@@ -36,10 +36,10 @@ SYNTHETIC_DATA_PATH="data/synthetic_4k"
 CONFIG="examples/train/configs/fine_tuning/wan/t2v_4k.yaml"
 
 # Map rung to (num_latent_t, num_height, num_width, num_frames)
-declare -A RUNG_LATENT_T=([0]=21 [1]=5  [2]=2 [3]=1 [4]=1 [5]=1)
+declare -A RUNG_LATENT_T=([0]=20 [1]=5  [2]=2 [3]=1 [4]=1 [5]=1)
 declare -A RUNG_HEIGHT=  ([0]=2160 [1]=2160 [2]=2160 [3]=2160 [4]=1440 [5]=1080)
 declare -A RUNG_WIDTH=   ([0]=3840 [1]=3840 [2]=3840 [3]=3840 [4]=2560 [5]=1920)
-declare -A RUNG_FRAMES=  ([0]=81   [1]=17   [2]=5    [3]=1    [4]=1    [5]=1)
+declare -A RUNG_FRAMES=  ([0]=77   [1]=17   [2]=5    [3]=1    [4]=1    [5]=1)
 
 NUM_LATENT_T="${RUNG_LATENT_T[$RUNG]}"
 HEIGHT="${RUNG_HEIGHT[$RUNG]}"

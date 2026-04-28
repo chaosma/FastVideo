@@ -1,7 +1,7 @@
 # Wan 2.1 T2V 1.3B — 4K fine-tune (milestone: one training step without crash)
 #
 # Rung ladder (climb down if OOM — change num_height/num_width/num_frames/num_latent_t together):
-#   Rung 0:  3840×2160, 81 frames, num_latent_t=21  ← final target
+#   Rung 0:  3840×2160, 77 frames, num_latent_t=20  ← final target (matches Wan2.1 native length)
 #   Rung 1:  3840×2160, 17 frames, num_latent_t=5
 #   Rung 2:  3840×2160,  5 frames, num_latent_t=2   ← DEFAULT START
 #   Rung 3:  3840×2160,  1 frame,  num_latent_t=1   (image mode)
@@ -49,10 +49,10 @@ training:
     num_width: 3840
     num_frames: 5
     # ── Rung 0 (comment in when hardware allows) ──────────────────────────
-    # num_latent_t: 21
+    # num_latent_t: 20
     # num_height: 2160
     # num_width: 3840
-    # num_frames: 81
+    # num_frames: 77
 
   optimizer:
     learning_rate: 1.0e-6

@@ -34,7 +34,7 @@ import pyarrow.parquet as pq
 # ── Rung definitions ──────────────────────────────────────────────────────────
 # Latent shape: [C=16, T=num_latent_t, H=height//8, W=width//8]
 RUNGS = {
-    0: dict(height=2160, width=3840, num_latent_t=21, num_frames=81),
+    0: dict(height=2160, width=3840, num_latent_t=20, num_frames=77),
     1: dict(height=2160, width=3840, num_latent_t=5,  num_frames=17),
     2: dict(height=2160, width=3840, num_latent_t=2,  num_frames=5),
     3: dict(height=2160, width=3840, num_latent_t=1,  num_frames=1),
