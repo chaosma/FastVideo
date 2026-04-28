@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 import gc
+import os
 from typing import Any, Literal, TYPE_CHECKING
 
 import torch
@@ -357,6 +358,10 @@ class WanModel(ModelBase):
 
             inference_args = make_inference_args(tc, model_path=tc.model_path)
 
+            # Rank-0-only inference pipeline: skip the SP warmup collective
+            # (other ranks aren't here to participate, and this pipeline only
+            # runs on rank 0 anyway).
+            os.environ["FASTVIDEO_SKIP_SP_WARMUP"] = "1"
             prompt_pipeline = WanPipeline.from_pretrained(
                 tc.model_path,
                 args=inference_args,

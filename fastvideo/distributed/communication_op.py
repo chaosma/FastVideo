@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Adapted from https://github.com/vllm-project/vllm/blob/v0.7.3/vllm/distributed/communication_op.py
 
+import os
+
 import torch
 
 from fastvideo.distributed.parallel_state import (get_sp_group, get_sp_world_size, get_tp_group,
@@ -112,6 +114,9 @@ def warmup_sequence_parallel_communication(device: torch.device | None = None) -
     sp_world_size = get_sp_world_size()
     if sp_world_size <= 1:
         _sp_warmup_done = True
+        return
+
+    if os.environ.get("FASTVIDEO_SKIP_SP_WARMUP", "0") == "1":
         return
 
     if device is None:
