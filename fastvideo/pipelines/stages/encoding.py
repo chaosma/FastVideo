@@ -61,7 +61,19 @@ class EncodingStage(PipelineStage):
         """
         assert batch.latents is not None and isinstance(batch.latents, torch.Tensor)
 
+        if torch.cuda.is_available():
+            alloc = torch.cuda.memory_allocated() / 1024**3
+            reserved = torch.cuda.memory_reserved() / 1024**3
+            logger.info("[mem] before EncodingStage: alloc=%.2f GiB reserved=%.2f GiB", alloc, reserved)
+            for name, mod in []:
+                pass
+
         self.vae = self.vae.to(get_local_torch_device())
+
+        if torch.cuda.is_available():
+            alloc = torch.cuda.memory_allocated() / 1024**3
+            reserved = torch.cuda.memory_reserved() / 1024**3
+            logger.info("[mem] after VAE-to-cuda: alloc=%.2f GiB reserved=%.2f GiB latents.shape=%s", alloc, reserved, tuple(batch.latents.shape))
 
         # Setup VAE precision
         vae_dtype = PRECISION_TO_TYPE[fastvideo_args.pipeline_config.vae_precision]

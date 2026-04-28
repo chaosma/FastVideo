@@ -447,8 +447,18 @@ class ComposedPipelineBase(ABC):
         # Execute each stage
         logger.info("Running pipeline stages: %s", self._stage_name_mapping.keys())
         # logger.info("Batch: %s", batch)
+        import torch as _torch
         for stage in self.stages:
+            stage_name = type(stage).__name__
+            if _torch.cuda.is_available():
+                alloc = _torch.cuda.memory_allocated() / 1024**3
+                reserved = _torch.cuda.memory_reserved() / 1024**3
+                logger.info("[mem] BEFORE %s: alloc=%.2f GiB reserved=%.2f GiB", stage_name, alloc, reserved)
             batch = stage(batch, fastvideo_args)
+            if _torch.cuda.is_available():
+                alloc = _torch.cuda.memory_allocated() / 1024**3
+                reserved = _torch.cuda.memory_reserved() / 1024**3
+                logger.info("[mem] AFTER  %s: alloc=%.2f GiB reserved=%.2f GiB", stage_name, alloc, reserved)
 
         # Return the output
         return batch

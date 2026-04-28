@@ -110,6 +110,7 @@ torchrun \
   --num-gpus "${GPU_NUM}" \
   --text-encoder-cpu-offload \
   --vae-cpu-offload \
+  --disable-autocast \
   --text-encoder-precisions bf16 \
   --vae-precision bf16 \
   --vae-tiling \
