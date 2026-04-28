@@ -60,8 +60,21 @@ class VideoTransformStage(PipelineStage):
             if fastvideo_args.preprocess_config.video_loader_type == VideoLoaderType.TORCHCODEC:
                 video = batch.video_loader[i].get_frames_at(frame_indices).data
             elif fastvideo_args.preprocess_config.video_loader_type == VideoLoaderType.TORCHVISION:
-                video, _, _ = torchvision.io.read_video(batch.video_loader[i], output_format="TCHW")
-                video = video[frame_indices]
+                # torchvision.io.read_video was removed in torchvision >=0.22.
+                # Decode the requested frames with PyAV instead.
+                import av
+                wanted = set(int(x) for x in frame_indices)
+                frames_by_idx: dict[int, torch.Tensor] = {}
+                with av.open(batch.video_loader[i]) as container:
+                    stream = container.streams.video[0]
+                    stream.thread_type = "AUTO"
+                    for frame_idx, frame in enumerate(container.decode(stream)):
+                        if frame_idx in wanted:
+                            arr = frame.to_ndarray(format="rgb24")  # H, W, 3
+                            frames_by_idx[frame_idx] = torch.from_numpy(arr).permute(2, 0, 1)  # C, H, W
+                            if len(frames_by_idx) == len(wanted):
+                                break
+                video = torch.stack([frames_by_idx[int(idx)] for idx in frame_indices], dim=0)  # T, C, H, W
             else:
                 raise ValueError(f"Invalid video loader type: {fastvideo_args.preprocess_config.video_loader_type}")
             video = self.video_transform(video)

@@ -39,6 +39,8 @@ GPU_NUM="${GPU_NUM:-1}"
 MODEL_PATH="${MODEL_PATH:-Wan-AI/Wan2.1-T2V-1.3B-Diffusers}"
 DATASET_PATH="${DATASET_PATH:-data/raw_4k}"
 OUTPUT_DIR="${OUTPUT_DIR:-data/preprocessed_4k}"
+MAX_HEIGHT="${MAX_HEIGHT:-2160}"
+MAX_WIDTH="${MAX_WIDTH:-3840}"
 
 # ── Rung → frame count ─────────────────────────────────────────────────────────
 case "$RUNG" in
@@ -104,19 +106,28 @@ torchrun \
   --model_path "${MODEL_PATH}" \
   --mode preprocess \
   --workload_type t2v \
-  --preprocess.video_loader_type torchvision \
-  --preprocess.dataset_type merged \
-  --preprocess.dataset_path "${DATASET_PATH}" \
-  --preprocess.dataset_output_dir "${OUTPUT_DIR}" \
-  --preprocess.max_height 2160 \
-  --preprocess.max_width 3840 \
-  --preprocess.num_frames "${NUM_FRAMES}" \
-  --preprocess.train_fps 16 \
-  --preprocess.preprocess_video_batch_size 1 \
-  --preprocess.dataloader_num_workers 0 \
-  --preprocess.samples_per_file 4 \
-  --preprocess.flush_frequency 4 \
-  --preprocess.video_length_tolerance_range 5
+  --sp-size "${GPU_NUM}" \
+  --num-gpus "${GPU_NUM}" \
+  --text-encoder-cpu-offload \
+  --vae-cpu-offload \
+  --text-encoder-precisions bf16 \
+  --vae-precision bf16 \
+  --vae-tiling \
+  --vae-sp \
+  --vae-config.use-parallel-tiling \
+  --preprocess.video-loader-type torchvision \
+  --preprocess.dataset-type merged \
+  --preprocess.dataset-path "${DATASET_PATH}" \
+  --preprocess.dataset-output-dir "${OUTPUT_DIR}" \
+  --preprocess.max-height "${MAX_HEIGHT}" \
+  --preprocess.max-width "${MAX_WIDTH}" \
+  --preprocess.num-frames "${NUM_FRAMES}" \
+  --preprocess.train-fps 16 \
+  --preprocess.preprocess-video-batch-size 1 \
+  --preprocess.dataloader-num-workers 0 \
+  --preprocess.samples-per-file 4 \
+  --preprocess.flush-frequency 4 \
+  --preprocess.video-length-tolerance-range 1000
 
 echo ""
 echo "=== Preprocessing complete ==="

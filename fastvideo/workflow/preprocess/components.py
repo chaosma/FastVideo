@@ -165,15 +165,21 @@ class ParquetDatasetSaver:
         # Prepare batch data for Parquet dataset
         batch_data: list[dict[str, Any]] = []
 
+        def _tensor_to_numpy(t: torch.Tensor):
+            t = t.detach().cpu()
+            # numpy has no native bfloat16; upcast to float32 for storage.
+            if t.dtype == torch.bfloat16:
+                t = t.to(torch.float32)
+            return t.numpy()
+
         for key in dataclasses.fields(batch):
             value = getattr(batch, key.name)
             if isinstance(value, list):
                 for idx in range(len(value)):
                     if isinstance(value[idx], torch.Tensor):
-                        value[idx] = value[idx].cpu().numpy()
+                        value[idx] = _tensor_to_numpy(value[idx])
             elif isinstance(value, torch.Tensor):
-                value = value.cpu().numpy()
-                setattr(batch, key.name, value)
+                setattr(batch, key.name, _tensor_to_numpy(value))
 
         # Create record for Parquet dataset
         records = self.create_records_from_batch(batch)
