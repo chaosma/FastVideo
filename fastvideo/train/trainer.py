@@ -182,6 +182,16 @@ class Trainer:
             metrics["vsa_sparsity"] = float(tc.vsa_sparsity)
             if self.global_rank == 0 and metrics:
                 self.tracker.log(metrics, step)
+                # Console echo so loss is visible without wandb.
+                _msg_parts = []
+                for _k in ("loss", "step_time_sec"):
+                    if _k in metrics:
+                        _msg_parts.append(f"{_k}={metrics[_k]:.6f}")
+                for _k, _v in metrics.items():
+                    if _k in ("loss", "step_time_sec"):
+                        continue
+                    _msg_parts.append(f"{_k}={_v}")
+                progress.write(f"[step {step}] " + " ".join(_msg_parts))
 
             self.callbacks.on_training_step_end(
                 method,
