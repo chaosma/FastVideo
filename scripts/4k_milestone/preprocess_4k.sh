@@ -5,7 +5,7 @@
 #   bash scripts/4k_milestone/preprocess_4k.sh [--rung N]
 #
 # Rungs map to different frame counts (must satisfy: (num_frames-1) % 4 == 0):
-#   Rung 0: 81 frames (num_latent_t=21) — full target
+#   Rung 0: 77 frames (num_latent_t=20) — full target (Wan2.1 native length)
 #   Rung 1: 17 frames (num_latent_t=5)
 #   Rung 2:  5 frames (num_latent_t=2)  ← default
 #   Rung 3:  1 frame  (num_latent_t=1)  image mode
@@ -44,7 +44,7 @@ MAX_WIDTH="${MAX_WIDTH:-3840}"
 
 # ── Rung → frame count ─────────────────────────────────────────────────────────
 case "$RUNG" in
-  0) NUM_FRAMES=81 ;;
+  0) NUM_FRAMES=77 ;;
   1) NUM_FRAMES=17 ;;
   2) NUM_FRAMES=5  ;;
   3) NUM_FRAMES=1  ;;
@@ -62,7 +62,7 @@ done
 
 # Re-apply rung after flag parsing
 case "$RUNG" in
-  0) NUM_FRAMES=81 ;;
+  0) NUM_FRAMES=77 ;;
   1) NUM_FRAMES=17 ;;
   2) NUM_FRAMES=5  ;;
   3) NUM_FRAMES=1  ;;
