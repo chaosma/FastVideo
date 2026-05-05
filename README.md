@@ -85,31 +85,54 @@ python -m fastvideo.train.entrypoint.dcp_to_diffusers \
 ## Tests
 
 ```bash
-pytest tests/             # imports + dry-run smoke
+pytest tests/             # imports + dry-run smoke + CLI surface
 pytest -k 'dry_run'       # the dry-run test alone (uses data/real_4k_rung2)
 ```
+
+## Inference
+
+A trimmed CLI is included for sampling from a checkpoint:
+
+```bash
+fastvideo generate --config <run.yaml> [--request.prompt "..."]
+# or directly:
+python -m fastvideo.entrypoints.cli.main generate --config <run.yaml>
+```
+
+The Python API is also available:
+
+```python
+from fastvideo import VideoGenerator
+gen = VideoGenerator.from_config(run_config.generator)
+gen.generate(run_config.request)
+```
+
+The OpenAI-style HTTP server, streaming server, and Ray executor are NOT
+included. Inference uses the multiprocess executor (`mp` backend) only.
+LoRA at inference is also not wired up.
 
 ## Repository layout
 
 ```
 fastvideo/
-├── api/              # SamplingParam + presets only — drives Wan negative-prompt loading
+├── api/              # config schemas + CLI parser (shared by inference + training)
 ├── attention/        # SDPA / FlashAttention selectors
 ├── configs/          # Wan-only model + pipeline configs
 ├── dataset/          # parquet map-style dataloader + preprocessing datasets
 ├── distributed/      # SP / FSDP / NCCL helpers
+├── entrypoints/      # PURE INFERENCE: CLI + VideoGenerator
 ├── hooks/, layers/, logging_utils/, platforms/, third_party/
 ├── models/
 │   ├── dits/wanvideo.py      # WanTransformer3DModel
 │   ├── vaes/{wanvae,common,autoencoder_kl}.py
 │   ├── encoders/{t5,t5_hf,clip,vision,base}.py
-│   ├── schedulers/{flow_match_euler_discrete,flow_unipc_multistep}.py
+│   ├── schedulers/{flow_match_euler_discrete,flow_unipc_multistep,unipc_multistep}.py
 │   └── loader/, registry.py
 ├── pipelines/
-│   ├── basic/wan/{wan_pipeline,wan_i2v_pipeline,presets}.py
+│   ├── basic/wan/{wan_pipeline,wan_i2v_pipeline,presets}.py  # T2V + I2V (used by both)
 │   ├── preprocess/wan/wan_preprocess_pipelines.py + v1_preprocessing_new.py
-│   └── stages/  # eleven Wan-relevant stages
-├── train/                   # YAML-driven trainer (the live training surface)
+│   └── stages/                                               # 11 Wan-relevant stages
+├── train/                   # PURE TRAINING (YAML-driven)
 │   ├── entrypoint/train.py + dcp_to_diffusers.py
 │   ├── methods/fine_tuning/finetune.py
 │   ├── models/wan/wan.py
@@ -117,6 +140,7 @@ fastvideo/
 ├── training/                # SHARED trainer utilities (training_utils,
 │                            # activation_checkpoint, checkpointing_utils,
 │                            # trackers) — the *_pipeline.py classes were dropped
+├── worker/                  # PURE INFERENCE: multiproc GPU worker pool
 └── workflow/preprocess/     # preprocess workflow orchestration
 examples/train/configs/fine_tuning/wan/{t2v,t2v_4k}.yaml
 scripts/4k_milestone/        # preprocess_4k.sh + synthetic data generators
@@ -124,17 +148,21 @@ scripts/checkpoint_conversion/wan_to_diffusers.py
 reports/                     # 4K H200 + 4K Wan2.2-5B benchmark writeups
 ```
 
+The cleanest train/inference separation:
+
+- **Training-only:** `fastvideo/train/`
+- **Inference-only:** `fastvideo/entrypoints/`, `fastvideo/worker/`
+- **Shared:** `fastvideo/api/` (full config schema), `fastvideo/pipelines/basic/wan/` (training also calls WanPipeline on rank 0 to encode the negative prompt at startup), `fastvideo/training/` (utilities), the model graph in `fastvideo/models/`
+
 ## What's intentionally missing
 
-- Inference: there is no `fastvideo` CLI, no OpenAI-style server, no
-  `VideoGenerator`. To sample from a trained model, convert the DCP
-  checkpoint to Diffusers format and run inference with upstream
-  FastVideo or vanilla diffusers.
+- OpenAI-style HTTP server, streaming server, gradio demo, ComfyUI
+  nodes, web UI. Inference is via the `fastvideo generate` CLI or the
+  `VideoGenerator` Python API only.
+- Ray executor — inference uses the multiprocess executor only.
+- LoRA at inference / VSA / distillation (DMD, KD, self-forcing, dfsft).
 - Validation during training: `ValidationCallback` was removed because
-  the canonical 4K configs ran with it disabled and re-enabling needs
-  the inference pipeline.
-- LoRA / VSA / distillation (DMD, KD, self-forcing, dfsft).
-- ComfyUI nodes, web UI, gradio demos, modal/serverless harness.
+  the canonical 4K configs ran with it disabled.
 - All non-Wan model families. `fastvideo/models/dits/` keeps only
   `wanvideo.py` (+ `base.py`).
 
