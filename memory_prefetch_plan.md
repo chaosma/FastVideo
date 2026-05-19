@@ -410,3 +410,97 @@ final validation.**
 - `memory_probe.py` (workspace-level) — per-layer hooks.
 - `examples/train/run.sh` — `PYTORCH_CUDA_ALLOC_CONF`.
 - New tests under `fastvideo/tests/training/streaming/`.
+
+## 10. Phase 1 notes — implementation status & validation checklist
+
+### What landed
+
+**New file: `fastvideo/training/memory_probe.py`** (~370 lines)
+- `MemoryProbe` class — installs 4 hooks per transformer block on the
+  `CheckpointWrapper` (`forward_pre`, `forward`, `full_backward_pre`,
+  `full_backward`) plus 9 phase-boundary snaps per training step.
+- Per-layer events are recorded *without* `cuda.synchronize()` (allocator
+  state is host-side bookkeeping, so reads are non-perturbing). Phase snaps
+  DO synchronize and reset the peak counter between phases so each phase
+  gets its own `max_allocated_gb` reading.
+- Auto-finalizes after `FASTVIDEO_MEM_PROBE_STEPS` steps: writes
+  `layer_trace.csv` + `phase_memory.json`, removes its hooks, and lets
+  training continue.
+- DTensor-aware categorization (uses `.to_local()` when present, falls
+  back to `.numel() * .element_size()`).
+- Per-rank file suffixes if `FASTVIDEO_MEM_PROBE_ALL_RANKS=1` (default:
+  rank-0 only).
+
+**Wired into `fastvideo/training/training_pipeline.py`**:
+- `train()`: calls `maybe_init_from_env()` after `_log_validation`, then
+  `probe.install(self.transformer, optimizer=self.optimizer)`. No-op when
+  the env var is unset, so zero overhead in normal training.
+- `train_one_step()`: `step_begin` + `snap("P0_idle")` at top;
+  `snap("P1_inputs_done")` after input prep; `snap("P7_opt_done")` after
+  optimizer step; `snap("P0_next")` + `step_end` at bottom. (P3 fires
+  automatically inside the mid-layer's forward hook.)
+- `_transformer_forward_and_compute_loss()`: `snap("P2_fwd_start")` before
+  forward; `snap("P4_fwd_end")` after forward, before `loss.backward()`;
+  `snap("P5_bwd_peak")` + `snap("P6_post_bwd")` immediately after backward.
+
+### How to run on the 4×H200 / 5B rig
+
+```bash
+FASTVIDEO_MEM_PROBE_STEPS=2 \
+FASTVIDEO_MEM_PROBE_DIR=/path/to/output \
+bash examples/train/run.sh
+```
+
+Two steps gives one warmup + one measured step. Add
+`FASTVIDEO_MEM_PROBE_TOPK=10` to also capture the top-10 live allocations
+per phase (slower, calls `cuda.memory._snapshot()` once per phase).
+
+### Validation checklist — items to verify from one 5B run
+
+These are the checks Phase 1 was designed to surface, before Phase 2
+commits to a design. The probe's job is to confirm (or refute) the
+memory-budget assumptions in §1.
+
+1. **Pack-list size per block.** From `layer_trace.csv`, the
+   `allocated_gb` delta between `fwd_pre` and `fwd_post` at each block is
+   the bf16 stash for that block. Expect ~1.7 GB on 14B, ~0.7 GB on 5B.
+   If a block shows substantially more, something is being saved beyond
+   the block input — that changes the per-block stash size and the
+   host-RAM budget.
+2. **No double-counting from aliasing.** Sum the per-block fwd deltas
+   across all 30 (5B) / 40 (14B) blocks and compare against
+   `P4_fwd_end.allocated_gb − P2_fwd_start.allocated_gb`. Should match
+   closely. If the per-block sum is larger, `save_on_cpu` is pinning
+   aliased storages twice — would inflate the Phase 4 host-RAM assert.
+3. **First-block-in-backward stall.** Look at the `bwd_pre` timestamp on
+   the last block (idx 29 on 5B / 39 on 14B) — that's the kernel-free
+   interval before backward kernels can run. The plan budgets ~30 ms on
+   14B; on 5B it should be roughly half. This sets the floor on step-time
+   overhead from streaming.
+4. **P3 sanity.** Mid-block forward should show roughly half of the
+   eventual P4 stash, confirming linear accumulation across blocks. A
+   non-linear curve would suggest something other than per-layer stash
+   dominates the forward growth.
+5. **VAE drop is real (Phase 0 cross-check).** Compare `P0_idle.allocated_gb`
+   against the same number with `training.data.load_vae_into_training: true`.
+   Expect a 2.82 GB drop on 5B; the `categories_gb["vae"]` field should
+   go from non-zero to zero.
+
+### Not implemented (intentionally, scope-limited)
+
+- **`memory_timeline_5B_4xH200_no_vae.svg`** and any visualization SVGs.
+  Once the JSON exists, generating the SVG is a separate small script —
+  trivial to add when needed, but left out of Phase 1 to stay scoped.
+- **VAE/T5 `extras` passed to `_categorize`** are empty for now. With
+  Phase 0 in place there's no VAE module loaded to measure anyway, and
+  T5 isn't loaded in FastVideo's training pipeline (text embeddings come
+  from parquet). The plumbing is there if a future model loads either.
+
+### Open question for the 4×H200 / 5B test
+
+If any of items 1–4 don't match the analytic prediction, **stop and
+investigate before starting Phase 2**. The streaming design assumes the
+per-block stash list is exactly one bf16 tensor of shape `(B, N_local, H)`;
+a surprise here (e.g. cross-attention K/V also being saved, or RNG state
+being pinned despite `preserve_rng_state=False`) would change both the
+host-RAM budget and the prefetch scheduling.
