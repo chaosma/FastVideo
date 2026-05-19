@@ -38,6 +38,7 @@ from fastvideo.logger import init_logger
 from fastvideo.pipelines import (ComposedPipelineBase, ForwardBatch, LoRAPipeline, TrainingBatch)
 from fastvideo.platforms import current_platform
 from fastvideo.training.activation_checkpoint import (apply_activation_checkpointing)
+from fastvideo.training import memory_probe
 from fastvideo.training.trackers import (DummyTracker, TrackerType, initialize_trackers, Trackers)
 from fastvideo.training.training_utils import (clip_grad_norm_while_handling_failing_dtensor_cases,
                                                compute_density_for_timestep_sampling, count_trainable, get_scheduler,
@@ -401,6 +402,7 @@ class TrainingPipeline(LoRAPipeline, ABC):
 
         with self.tracker.timed("timing/forward_backward"), set_forward_context(
                 current_timestep=training_batch.current_timestep, attn_metadata=training_batch.attn_metadata):
+            memory_probe.snap("P2_fwd_start")
             model_pred = current_model(**input_kwargs)
             if self.training_args.precondition_outputs:
                 assert training_batch.sigmas is not None
@@ -414,8 +416,11 @@ class TrainingPipeline(LoRAPipeline, ABC):
 
             loss = (torch.mean(
                 (model_pred.float() - target.float())**2) / self.training_args.gradient_accumulation_steps)
+            memory_probe.snap("P4_fwd_end")
 
             loss.backward()
+            memory_probe.snap("P5_bwd_peak")
+            memory_probe.snap("P6_post_bwd")
 
             avg_loss = loss.detach().clone()
 
@@ -457,6 +462,8 @@ class TrainingPipeline(LoRAPipeline, ABC):
 
     @profile_region("profiler_region_training_train_one_step")
     def train_one_step(self, training_batch: TrainingBatch) -> TrainingBatch:
+        memory_probe.step_begin()
+        memory_probe.snap("P0_idle")
         training_batch = self._prepare_training(training_batch)
 
         for _ in range(self.training_args.gradient_accumulation_steps):
@@ -477,6 +484,7 @@ class TrainingPipeline(LoRAPipeline, ABC):
 
             training_batch = self._build_attention_metadata(training_batch)
             training_batch = self._build_input_kwargs(training_batch)
+            memory_probe.snap("P1_inputs_done")
 
             training_batch = self._transformer_forward_and_compute_loss(training_batch)
 
@@ -490,7 +498,10 @@ class TrainingPipeline(LoRAPipeline, ABC):
             else:
                 self.optimizer.step()
                 self.lr_scheduler.step()
+        memory_probe.snap("P7_opt_done")
 
+        memory_probe.snap("P0_next")
+        memory_probe.step_end()
         return training_batch
 
     def _resume_from_checkpoint(self) -> None:
@@ -539,6 +550,12 @@ class TrainingPipeline(LoRAPipeline, ABC):
         self._log_training_info()
 
         self._log_validation(self.transformer, self.training_args, self.init_steps)
+
+        # Memory probe: opt-in via FASTVIDEO_MEM_PROBE_STEPS env var.
+        # Hooks self-uninstall after the requested step count.
+        probe = memory_probe.maybe_init_from_env(self.global_rank)
+        if probe is not None:
+            probe.install(self.transformer, optimizer=self.optimizer)
 
         # Train!
         progress_bar = tqdm(
