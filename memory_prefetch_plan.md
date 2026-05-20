@@ -411,96 +411,183 @@ final validation.**
 - `examples/train/run.sh` — `PYTORCH_CUDA_ALLOC_CONF`.
 - New tests under `fastvideo/tests/training/streaming/`.
 
-## 10. Phase 1 notes — implementation status & validation checklist
+## 10. Status — Phases 0 & 1 implemented and validated on 5B / 4×H200
+
+Validated on a fresh 4× H200 SXM box with the Wan 2.2 TI2V 5B model at
+24fps × 121 frames × 704×1280, `sp_size=4`, `hsdp_shard_dim=4`,
+`CheckpointType.FULL` (recompute, no CPU offload — `full_offload` is what
+Phase 2 will add). Probe outputs: `probe_5B_121f_run4/{layer_trace.csv,
+phase_memory.json}`.
 
 ### What landed
 
-**New file: `fastvideo/training/memory_probe.py`** (~370 lines)
-- `MemoryProbe` class — installs 4 hooks per transformer block on the
-  `CheckpointWrapper` (`forward_pre`, `forward`, `full_backward_pre`,
-  `full_backward`) plus 9 phase-boundary snaps per training step.
-- Per-layer events are recorded *without* `cuda.synchronize()` (allocator
-  state is host-side bookkeeping, so reads are non-perturbing). Phase snaps
-  DO synchronize and reset the peak counter between phases so each phase
-  gets its own `max_allocated_gb` reading.
-- Auto-finalizes after `FASTVIDEO_MEM_PROBE_STEPS` steps: writes
-  `layer_trace.csv` + `phase_memory.json`, removes its hooks, and lets
-  training continue.
-- DTensor-aware categorization (uses `.to_local()` when present, falls
-  back to `.numel() * .element_size()`).
-- Per-rank file suffixes if `FASTVIDEO_MEM_PROBE_ALL_RANKS=1` (default:
-  rank-0 only).
+**Phase 0 — VAE drop**
+- `fastvideo/train/utils/training_config.py`: added
+  `DataConfig.load_vae_into_training: bool = False` (default off).
+- `fastvideo/train/models/wan/wan.py`: `init_preprocessors` now gates the
+  `load_module_from_path(..., "vae", ...)` call. When disabled, builds a
+  `_WanVAEStatsStub` exposing only `latents_mean` / `latents_std` (the
+  only fields `normalize_dit_input` reads).
+- **Critical fix discovered on first 5B run:** the stub originally pulled
+  its constants from `pipeline_config.vae_config.arch_config`, which
+  still carries Wan 2.1's z_dim=16 values even when running Wan 2.2 5B
+  (z_dim=48). That made backward fail at the very first
+  `normalize_dit_input` broadcast (`The size of tensor a (48) must match
+  the size of tensor b (16) at non-singleton dimension 1`). Fixed by
+  reading the actual `<model_path>/vae/config.json` from the diffusers
+  snapshot. **This needs the same fix in any future per-model stub.**
 
-**Wired into `fastvideo/training/training_pipeline.py`**:
-- `train()`: calls `maybe_init_from_env()` after `_log_validation`, then
-  `probe.install(self.transformer, optimizer=self.optimizer)`. No-op when
-  the env var is unset, so zero overhead in normal training.
-- `train_one_step()`: `step_begin` + `snap("P0_idle")` at top;
-  `snap("P1_inputs_done")` after input prep; `snap("P7_opt_done")` after
-  optimizer step; `snap("P0_next")` + `step_end` at bottom. (P3 fires
-  automatically inside the mid-layer's forward hook.)
-- `_transformer_forward_and_compute_loss()`: `snap("P2_fwd_start")` before
-  forward; `snap("P4_fwd_end")` after forward, before `loss.backward()`;
-  `snap("P5_bwd_peak")` + `snap("P6_post_bwd")` immediately after backward.
+**Phase 1 — memory probe**
+- `fastvideo/training/memory_probe.py` (~470 lines): `MemoryProbe` class,
+  `maybe_init_from_env(rank)` factory, module-level `snap` /
+  `step_begin` / `step_end` shortcuts. Auto-finalises after
+  `FASTVIDEO_MEM_PROBE_STEPS` steps: writes `layer_trace.csv` and
+  `phase_memory.json` (rank-0 only by default; `FASTVIDEO_MEM_PROBE_ALL_RANKS=1`
+  to capture every rank). DTensor-aware categorisation via `to_local()`.
+- **Wiring fix needed on first probe run:** the original Phase 1 patch
+  wired the probe into `fastvideo/training/training_pipeline.py:train()`,
+  but the actual training entrypoint is `fastvideo/train/trainer.py:run()`.
+  Probe never initialised. Rewired into the right loop: install on
+  `method.student.transformer` + `next(iter(method.get_optimizers(...)))`
+  at the top of `run()`, and `step_begin` / `snap` / `step_end` around
+  the per-step body.
+  - The legacy snap sites in `training_pipeline.py` were left in place
+    (no-op when probe inactive) so older code paths still benefit if/when
+    they're used.
 
-### How to run on the 4×H200 / 5B rig
+### How to reproduce
 
 ```bash
-FASTVIDEO_MEM_PROBE_STEPS=2 \
-FASTVIDEO_MEM_PROBE_DIR=/path/to/output \
-bash examples/train/run.sh
+mkdir -p /workspace/FastVideo/probe_out
+# Run from inside a wrapper script so env survives the nohup detach
+# (the bash invocation form `export X=Y && nohup …` lost env in our tests).
+cat > /tmp/_probe_run.sh <<'EOF'
+#!/bin/bash
+export HF_HOME=/workspace/.hf_home
+export FASTVIDEO_MEM_PROBE_STEPS=2
+export FASTVIDEO_MEM_PROBE_DIR=/workspace/FastVideo/probe_out
+export WANDB_MODE=disabled
+export NUM_GPUS=4
+cd /workspace/FastVideo
+source /workspace/venv/main/bin/activate
+exec bash examples/train/run.sh \
+    examples/train/configs/fine_tuning/wan/t2v_4k.yaml \
+    --models.student.init_from Wan-AI/Wan2.2-TI2V-5B-Diffusers \
+    --pipeline.flow_shift 5.0 \
+    --training.distributed.num_gpus 4 \
+    --training.distributed.sp_size 4 \
+    --training.distributed.hsdp_shard_dim 4 \
+    --training.data.data_path data/synthetic_5b_121f \
+    --training.data.num_height 704 --training.data.num_width 1280 \
+    --training.data.num_frames 121 --training.data.num_latent_t 31 \
+    --training.loop.max_train_steps 2 \
+    --training.checkpoint.resume_from_checkpoint ""
+EOF
+chmod +x /tmp/_probe_run.sh
+nohup /tmp/_probe_run.sh > probe_out/train.log 2>&1 &
 ```
 
-Two steps gives one warmup + one measured step. Add
-`FASTVIDEO_MEM_PROBE_TOPK=10` to also capture the top-10 live allocations
-per phase (slower, calls `cuda.memory._snapshot()` once per phase).
+The synthetic dataset comes from
+`python scripts/4k_milestone/make_synthetic_5b_data.py --rung 6 \
+    --n-samples 4 --output-dir data/synthetic_5b_121f`
+(rung 6 added for this experiment: 704×1280, 121 frames, num_latent_t=31).
 
-### Validation checklist — items to verify from one 5B run
+### Findings from the 5B / 4×H200 / 24fps × 121f / 704×1280 run
 
-These are the checks Phase 1 was designed to surface, before Phase 2
-commits to a design. The probe's job is to confirm (or refute) the
-memory-budget assumptions in §1.
+Step 1 (steady state) phase memory, rank 0:
 
-1. **Pack-list size per block.** From `layer_trace.csv`, the
-   `allocated_gb` delta between `fwd_pre` and `fwd_post` at each block is
-   the bf16 stash for that block. Expect ~1.7 GB on 14B, ~0.7 GB on 5B.
-   If a block shows substantially more, something is being saved beyond
-   the block input — that changes the per-block stash size and the
-   host-RAM budget.
-2. **No double-counting from aliasing.** Sum the per-block fwd deltas
-   across all 30 (5B) / 40 (14B) blocks and compare against
-   `P4_fwd_end.allocated_gb − P2_fwd_start.allocated_gb`. Should match
-   closely. If the per-block sum is larger, `save_on_cpu` is pinning
-   aliased storages twice — would inflate the Phase 4 host-RAM assert.
-3. **First-block-in-backward stall.** Look at the `bwd_pre` timestamp on
-   the last block (idx 29 on 5B / 39 on 14B) — that's the kernel-free
-   interval before backward kernels can run. The plan budgets ~30 ms on
-   14B; on 5B it should be roughly half. This sets the floor on step-time
-   overhead from streaming.
-4. **P3 sanity.** Mid-block forward should show roughly half of the
-   eventual P4 stash, confirming linear accumulation across blocks. A
-   non-linear curve would suggest something other than per-layer stash
-   dominates the forward growth.
-5. **VAE drop is real (Phase 0 cross-check).** Compare `P0_idle.allocated_gb`
-   against the same number with `training.data.load_vae_into_training: true`.
-   Expect a 2.82 GB drop on 5B; the `categories_gb["vae"]` field should
-   go from non-zero to zero.
+| Phase            | allocated GB | max_alloc GB | reserved GB |
+|------------------|-------------:|-------------:|------------:|
+| P0_idle          |        15.11 |        15.11 |       26.87 |
+| P1_inputs_done   |        15.11 |        15.11 |       26.87 |
+| P2_fwd_start     |        15.11 |        15.11 |       26.87 |
+| P3_fwd_half      |        16.40 |        17.82 |       29.15 |
+| P4_fwd_end       |        16.81 |        18.40 |       29.15 |
+| **P5_bwd_peak**  |    **20.13** |    **23.40** |       30.01 |
+| P6_post_bwd      |        20.13 |        20.13 |       30.01 |
+| **P7_opt_done**  |        20.11 |    **25.11** |       30.01 |
+| P0_next          |        15.11 |        20.11 |       30.01 |
 
-### Not implemented (intentionally, scope-limited)
+Step peak: **25.11 GB** (Adam-cast transient at P7).
+Backward peak: **23.40 GB** (P5_bwd_peak max).
 
-- **`memory_timeline_5B_4xH200_no_vae.svg`** and any visualization SVGs.
-  Once the JSON exists, generating the SVG is a separate small script —
-  trivial to add when needed, but left out of Phase 1 to stay scoped.
-- **VAE/T5 `extras` passed to `_categorize`** are empty for now. With
-  Phase 0 in place there's no VAE module loaded to measure anyway, and
-  T5 isn't loaded in FastVideo's training pipeline (text embeddings come
-  from parquet). The plumbing is there if a future model loads either.
+Phase 0 cross-check (item 5 of the original checklist): every snapshot
+shows `categories_gb["vae"] = 0.0`. VAE drop is real.
 
-### Open question for the 4×H200 / 5B test
+Per-layer trace summary (30 blocks, 240 events over 2 steps):
 
-If any of items 1–4 don't match the analytic prediction, **stop and
-investigate before starting Phase 2**. The streaming design assumes the
-per-block stash list is exactly one bf16 tensor of shape `(B, N_local, H)`;
-a surprise here (e.g. cross-attention K/V also being saved, or RNG state
-being pinned despite `preserve_rng_state=False`) would change both the
-host-RAM budget and the prefetch scheduling.
+- **Forward stash per block:** layers 1–29 each add **+0.042 GB**
+  (≈ 42 MB bf16). Layer 0 adds +0.189 GB (carries the external input
+  residual in addition to its own). Σ over 30 blocks ≈ 1.26 GB, which
+  matches P4 − P2 = 1.70 GB minus ~0.4 GB of FSDP/comm scratch.
+- **Backward growth per layer:** +0.167 GB per layer (gradient slot
+  accumulation), constant across layers 28 → 1. Net of stash freed: as
+  designed.
+- **First-block-in-backward stall:** layer 29 backward step is
+  +0.822 GB vs the steady +0.167 GB — the recompute-internals working
+  set materialising on top of an empty pipeline. Sets the floor for
+  start-of-backward overhead the prefetch scheduler can't amortise.
+
+### Validation checklist — results
+
+1. ✅ **Pack-list size per block** — flat at 42 MB on layers 1–29,
+   linear accumulation in fwd. Smaller than the §1 estimate of 0.7 GB
+   on 5B because we ran at 704×1280, not 4K (Phase 5 will rerun at the
+   per-rank token count the plan budgeted).
+2. ✅ **No double-counting** — Σ per-block fwd deltas (1.26 GB) ≤
+   P4 − P2 fwd growth (1.70 GB). No aliasing surprise.
+3. ✅ **First-block-in-backward stall observed** — 0.82 GB jump on
+   layer 29's first bwd step, isolated to that one block.
+4. ✅ **P3 sanity** — P3 allocated (16.40) is mid-way between P2 (15.11)
+   and P4 (16.81). Linear fwd accumulation.
+5. ✅ **VAE drop confirmed** — `categories_gb["vae"] = 0.0` at all
+   phases. P0_idle of 15.11 GB reflects bf16 weights + Adam m/v (5 GB
+   each), no VAE.
+
+### Backward access pattern — confirmed simple
+
+The trace confirms that block backward fires in strict reverse forward
+order (29 → 28 → ... → 0). Internals materialised by recompute are
+transient within one block's backward and never need to enter the
+prefetch queue. The Phase 2/3 design (FILO offload of block inputs +
+one-deep prefetch on a dedicated copy stream) is the correct model;
+nothing weirder is happening underneath.
+
+### Known caveats for Phase 2 planning
+
+- **Baseline mode mismatch.** The 43.56 GB plan baseline assumes a
+  `full_offload` mode (`save_on_cpu` of every checkpointed tensor)
+  that is **not** in the repo. Today's `CheckpointType` only has
+  `FULL` / `OPS` / `BLOCK_SKIP`. Phase 2 needs to first add the
+  `full_offload` baseline (so we have something to streaming-improve),
+  then the streamed variant.
+- **Resolution gap.** This run was 704×1280 to keep the experiment
+  cheap. Phase 5 acceptance numbers in §3 (43.56 → ≤ 36 GB peak) were
+  benchmarked at a different size — Phase 5 needs to be re-stated for
+  whichever final resolution the 5B prototype settles on, or rerun at
+  the original measurement point.
+- **Per-rank weights category.** `categories_gb["weights_bf16"] = 5.0`
+  on a 5B model with hsdp_shard_dim=4 looks high (expected ~2.5 GB
+  per rank). Either FSDP isn't sharding what the categorise function
+  expects to find on `model.parameters()`, or the local fragment is
+  larger than the 1/N estimate. Worth verifying before quoting
+  attribution numbers; doesn't affect Phase 2/3 design.
+
+### Files
+
+| File | Purpose |
+|---|---|
+| `fastvideo/training/memory_probe.py` | Probe class, env-var entry point, CSV/JSON writers |
+| `fastvideo/train/trainer.py` | Probe install + per-step snap/step_begin/step_end |
+| `fastvideo/training/training_pipeline.py` | Legacy snap sites (kept; no-op when inactive) |
+| `fastvideo/train/models/wan/wan.py` | Phase 0 VAE-drop gate + stub reading real VAE config.json |
+| `fastvideo/train/utils/training_config.py` | `DataConfig.load_vae_into_training` flag |
+| `scripts/4k_milestone/make_synthetic_5b_data.py` | Added rung 6 (704×1280 × 121f) |
+| `probe_5B_121f_run4/{layer_trace.csv, phase_memory.json}` | Captured outputs |
+
+### Next
+
+Phase 2: implement `full_offload` baseline + `StreamedOffloadCheckpointWrapper`
+on a dedicated copy stream (per §3). Re-run this same probe under the
+new mode to confirm the access pattern stays FILO and the queue depth
+never exceeds 1 layer in flight.

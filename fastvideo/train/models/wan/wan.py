@@ -169,14 +169,19 @@ class WanModel(ModelBase):
             )
         else:
             # The training step only reads `vae.latents_mean` / `vae.latents_std`
-            # (in normalize_dit_input). Those constants live on the VAE config,
-            # so we can skip loading the encoder/decoder weights entirely.
-            vae_arch = (
-                training_config.pipeline_config.vae_config.arch_config  # type: ignore[union-attr]
-            )
+            # (in normalize_dit_input). Read them from the actual model's
+            # diffusers `vae/config.json` rather than the pipeline_config
+            # defaults — the latter still carry Wan 2.1 (z_dim=16) values even
+            # when running the Wan 2.2 5B model (z_dim=48), which would crash
+            # the broadcast in normalize_dit_input.
+            import json
+            from fastvideo.utils import maybe_download_model
+            local = maybe_download_model(str(training_config.model_path))
+            with open(os.path.join(local, "vae", "config.json")) as f:
+                vae_cfg = json.load(f)
             self.vae = _WanVAEStatsStub(
-                latents_mean=list(vae_arch.latents_mean),
-                latents_std=list(vae_arch.latents_std),
+                latents_mean=list(vae_cfg["latents_mean"]),
+                latents_std=list(vae_cfg["latents_std"]),
             )
 
         self.world_group = get_world_group()
