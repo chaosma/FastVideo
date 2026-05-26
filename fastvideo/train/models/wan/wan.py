@@ -17,6 +17,7 @@ from fastvideo.distributed import (
     get_world_group,
 )
 from fastvideo.forward_context import set_forward_context
+from fastvideo.logger import init_logger
 from fastvideo.models.schedulers.scheduling_flow_match_euler_discrete import (
     FlowMatchEulerDiscreteScheduler, )
 from fastvideo.pipelines import TrainingBatch
@@ -46,6 +47,8 @@ from fastvideo.train.utils.moduleloader import (
 if TYPE_CHECKING:
     from fastvideo.train.utils.training_config import (
         TrainingConfig, )
+
+logger = init_logger(__name__)
 
 try:
     from fastvideo.attention.backends.video_sparse_attn import (
@@ -135,10 +138,27 @@ class WanModel(ModelBase):
             None,
         ))
         if trainable and ckpt_type:
-            transformer = apply_activation_checkpointing(
-                transformer,
-                checkpointing_type=ckpt_type,
-            )
+            # Activation tracing is opt-out: when capturing a full lifecycle
+            # trace, gradient checkpointing hides intermediate saved tensors
+            # behind its NO_REENTRANT context. Setting
+            # ``FASTVIDEO_ACTIVATION_TRACE_DISABLE_GC=1`` (or any truthy value)
+            # skips the checkpoint wrapper for this run.
+            disable_gc_for_trace = os.environ.get(
+                "FASTVIDEO_ACTIVATION_TRACE_DISABLE_GC",
+                "",
+            ).strip().lower() in {"1", "true", "yes", "on"}
+            if disable_gc_for_trace:
+                logger.warning(
+                    "FASTVIDEO_ACTIVATION_TRACE_DISABLE_GC=1: skipping "
+                    "apply_activation_checkpointing(type=%s). Expect higher "
+                    "peak memory.",
+                    ckpt_type,
+                )
+            else:
+                transformer = apply_activation_checkpointing(
+                    transformer,
+                    checkpointing_type=ckpt_type,
+                )
         return transformer
 
     # ------------------------------------------------------------------
