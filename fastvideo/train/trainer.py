@@ -24,11 +24,19 @@ _TRUE_VALUES = {"1", "true", "yes", "on"}
 
 def _maybe_save_on_cpu_ctx():
     """Wrap the forward+backward in PyTorch's default activation offload
-    when ``FASTVIDEO_SAVE_ON_CPU=1``. Every saved-for-backward tensor is
-    D2H-copied to (pinned) CPU during forward and H2D-copied back during
-    backward, all on the compute stream --- no overlap, no prefetch.
-    Trades step time for peak GPU memory; see memory_prefetch_plan.md for
-    why a custom hook with a dedicated copy stream would do better."""
+    when ``FASTVIDEO_SAVE_ON_CPU=1``.
+
+    Composition with the activation tracer
+    --------------------------------------
+    ``saved_tensors_hooks`` is winner-takes-all: only the innermost
+    registered (pack, unpack) pair is used. The activation tracer
+    (``ActivationTrace.__enter__`` in single_train_step) enters its own
+    ``saved_tensors_hooks`` *after* this wrapper, so when both are on the
+    tracer is innermost and these hooks are dormant --- the tracer's
+    pack/unpack does the offload itself (see ``ActivationTrace._pack_hook``).
+
+    This wrapper still runs (harmlessly) when the tracer is on; it
+    provides the actual offload only when the tracer is disabled."""
     if os.environ.get("FASTVIDEO_SAVE_ON_CPU",
                       "").strip().lower() not in _TRUE_VALUES:
         return contextlib.nullcontext()
