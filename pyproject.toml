@@ -29,6 +29,7 @@ dependencies = [
     "torchaudio",
     "einops",
     "cloudpickle",            # used by fastvideo.models.registry (subprocess model probing)
+    "remote-pdb",             # used by fastvideo.utils.remote_breakpoint (debug helper)
 
     # Image / video I/O for preprocessing
     "pillow>=10.3.0",
