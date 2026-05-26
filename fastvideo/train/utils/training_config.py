@@ -31,6 +31,10 @@ class DataConfig:
     num_width: int = 0
     num_latent_t: int = 0
     num_frames: int = 0
+    # When False, the training pipeline skips loading the VAE weights.
+    # Latent statistics still come from the VAE config, so normalization
+    # is unaffected. Saves ~2.82 GB on 5B (fp32) and ~0.29 GB on 14B.
+    load_vae_into_training: bool = False
 
 
 @dataclass(slots=True)

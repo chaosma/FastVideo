@@ -60,6 +60,19 @@ except Exception:
     VideoMobaAttentionMetadataBuilder = None  # type: ignore[assignment]
 
 
+class _WanVAEStatsStub:
+    """Minimal stand-in for the Wan VAE used during training when the full
+    VAE weights are not loaded. Exposes the constants normalize_dit_input
+    reads from `vae.latents_mean` / `vae.latents_std`."""
+
+    __slots__ = ("latents_mean", "latents_std")
+
+    def __init__(self, latents_mean: list[float],
+                 latents_std: list[float]) -> None:
+        self.latents_mean = latents_mean
+        self.latents_std = latents_std
+
+
 class WanModel(ModelBase):
     """Wan per-role model: owns transformer + noise_scheduler."""
 
@@ -166,11 +179,31 @@ class WanModel(ModelBase):
     # ------------------------------------------------------------------
 
     def init_preprocessors(self, training_config: TrainingConfig) -> None:
-        self.vae = load_module_from_path(
-            model_path=str(training_config.model_path),
-            module_type="vae",
-            training_config=training_config,
-        )
+        load_vae = bool(
+            getattr(training_config.data, "load_vae_into_training", False))
+        if load_vae:
+            self.vae = load_module_from_path(
+                model_path=str(training_config.model_path),
+                module_type="vae",
+                training_config=training_config,
+            )
+        else:
+            # The training step only reads `vae.latents_mean` /
+            # `vae.latents_std` (in normalize_dit_input). Read them from
+            # the actual model's diffusers `vae/config.json` rather than
+            # the pipeline_config defaults --- the latter still carry
+            # Wan 2.1 (z_dim=16) values even when running the Wan 2.2 5B
+            # model (z_dim=48), which would crash the broadcast in
+            # normalize_dit_input.
+            import json
+            from fastvideo.utils import maybe_download_model
+            local = maybe_download_model(str(training_config.model_path))
+            with open(os.path.join(local, "vae", "config.json")) as f:
+                vae_cfg = json.load(f)
+            self.vae = _WanVAEStatsStub(
+                latents_mean=list(vae_cfg["latents_mean"]),
+                latents_std=list(vae_cfg["latents_std"]),
+            )
 
         self.world_group = get_world_group()
         self.sp_group = get_sp_group()
