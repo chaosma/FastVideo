@@ -41,6 +41,11 @@ class _SavedTensorHandle:
     save_event_id: int
     module_path: str | None
     layer: int | None
+    # When the tensor was offloaded to CPU at pack time, this is the
+    # original CUDA device it must be copied back to at unpack time.
+    # None means no offload happened --- ``tensor`` is the original
+    # detached tensor and is returned to autograd as-is.
+    orig_device: torch.device | None = None
 
 
 class _NoopActivationTrace(AbstractContextManager["_NoopActivationTrace"]):
@@ -89,6 +94,21 @@ class ActivationTrace(AbstractContextManager["ActivationTrace"]):
             "FASTVIDEO_ACTIVATION_TRACE_FLUSH_EVERY",
             "1000",
         ))
+        # Compose ``torch.autograd.graph.save_on_cpu`` behavior into the
+        # tracer's own pack/unpack. ``saved_tensors_hooks`` is
+        # winner-takes-all (innermost context only); since the tracer's
+        # hooks are entered inside ``trainer.run()``'s save_on_cpu
+        # wrapper, the tracer is innermost and would otherwise preempt
+        # offload entirely. Doing the D2H/H2D copy inside our pack/unpack
+        # keeps both the lifecycle JSONL and the offload working.
+        self.offload_to_cpu = os.environ.get(
+            "FASTVIDEO_SAVE_ON_CPU",
+            "",
+        ).strip().lower() in _TRUE_VALUES
+        self.offload_pin = os.environ.get(
+            "FASTVIDEO_SAVE_ON_CPU_PIN",
+            "1",
+        ).strip().lower() in _TRUE_VALUES
         self._module_stack: list[str] = []
         self._handles: list[Any] = []
         self._event_id = 0
@@ -111,6 +131,8 @@ class ActivationTrace(AbstractContextManager["ActivationTrace"]):
         self.log_marker("trace_start", {
             "trace_path": str(path),
             "module_detail": self.module_detail,
+            "offload_to_cpu": self.offload_to_cpu,
+            "offload_pin": self.offload_pin if self.offload_to_cpu else None,
             "metadata": self.metadata,
         })
         return self
@@ -148,6 +170,8 @@ class ActivationTrace(AbstractContextManager["ActivationTrace"]):
         module_path = self._current_module()
         layer = self._extract_layer(module_path)
         event_id = self._next_event_id()
+        # Log the ORIGINAL tensor's metadata (device=cuda for offloadable
+        # tensors), so the JSONL still reflects what autograd saved.
         self._write_tensor_event(
             "saved_tensor_pack",
             tensor,
@@ -155,11 +179,33 @@ class ActivationTrace(AbstractContextManager["ActivationTrace"]):
             layer=layer,
             event_id=event_id,
         )
+        orig_device: torch.device | None = None
+        if self.offload_to_cpu and tensor.is_cuda:
+            orig_device = tensor.device
+            if self.offload_pin:
+                # Same pattern as torch.autograd.graph.save_on_cpu with
+                # pin_memory=True: allocate a pinned-host buffer of the
+                # exact shape/dtype, then enqueue a D2H copy on the
+                # current stream. Stream-ordering keeps the source GPU
+                # storage valid until the copy completes; the caching
+                # allocator can then reclaim it.
+                stored = torch.empty(
+                    tensor.size(),
+                    dtype=tensor.dtype,
+                    layout=tensor.layout,
+                    pin_memory=True,
+                )
+                stored.copy_(tensor)
+            else:
+                stored = tensor.detach().cpu()
+        else:
+            stored = tensor.detach()
         return _SavedTensorHandle(
-            tensor=tensor.detach(),
+            tensor=stored,
             save_event_id=event_id,
             module_path=module_path,
             layer=layer,
+            orig_device=orig_device,
         )
 
     def _unpack_hook(self, handle: _SavedTensorHandle) -> torch.Tensor:
@@ -170,6 +216,14 @@ class ActivationTrace(AbstractContextManager["ActivationTrace"]):
             layer=handle.layer,
             save_event_id=handle.save_event_id,
         )
+        if handle.orig_device is not None:
+            # H2D copy back to the original CUDA device. ``non_blocking``
+            # is only honored when the source is pinned, which matches
+            # ``offload_pin``.
+            return handle.tensor.to(
+                handle.orig_device,
+                non_blocking=self.offload_pin,
+            )
         return handle.tensor
 
     def _register_module_hooks(self) -> None:
