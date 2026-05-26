@@ -16,6 +16,11 @@ NUM_LATENT_T=$(((NUM_FRAMES - 1) / 4 + 1))
 # layout differs (e.g. DATA_PATH=data/real_4k_14b_rung0/training_dataset).
 DATA_PATH=${DATA_PATH:-data/real_4k_14b_${NUM_FRAMES}f/training_dataset}
 
+# Skip the ~84 GB final-checkpoint save for trace runs (the YAML
+# defaults to ``training_state_checkpointing_steps: 50`` and save_final
+# fires at end of training). Set SAVE_CHECKPOINT_STEPS=50 to restore.
+SAVE_CHECKPOINT_STEPS=${SAVE_CHECKPOINT_STEPS:-0}
+
 # ── PyTorch save_on_cpu (autograd activation offload) ───────────
 # When 1, wraps forward+backward in ``torch.autograd.graph.save_on_cpu``:
 # every saved-for-backward tensor is D2H-copied to pinned CPU during
@@ -86,6 +91,7 @@ FASTVIDEO_ACTIVATION_TRACE="${TRACE_ENABLE}" \
   --training.data.num_frames "${NUM_FRAMES}" \
   --training.data.num_latent_t "${NUM_LATENT_T}" \
   --training.loop.max_train_steps 1 \
+  --training.checkpoint.training_state_checkpointing_steps "${SAVE_CHECKPOINT_STEPS}" \
   --training.checkpoint.output_dir "outputs/wan_finetune_4k_14b_trace_${TAG}" \
   --training.tracker.run_name "wan_4k_14b_trace_${TAG}" \
   2>&1 | tee "${OUTER_LOG}"
