@@ -4,8 +4,10 @@
 Records two kinds of events per training step:
 
 1. Phase-boundary snapshots (9 named phases per the wan-calculator spec).
-   Calls torch.cuda.synchronize() and reads memory_allocated /
-   max_memory_allocated / memory_reserved. max is reset between phases.
+   Reads memory_allocated / max_memory_allocated / memory_reserved
+   without synchronizing --- allocator-side bookkeeping is updated at
+   alloc/free issue time, so no barrier is needed and step time is not
+   perturbed. max is reset between phases.
 2. Per-layer fwd/bwd events. Forward + backward hooks on every transformer
    block fire 4 times per block per step (fwd_pre, fwd_post, bwd_pre,
    bwd_post). These reads do NOT synchronize.
@@ -258,13 +260,15 @@ class MemoryProbe:
     # ------------------------------------------------------------------
 
     def snap(self, name: str) -> None:
-        """Record a named phase boundary. Synchronizes, reads memory, resets
-        the peak counter for the next phase."""
+        """Record a named phase boundary. Reads memory and resets the peak
+        counter for the next phase. Does NOT synchronize --- syncs would
+        perturb step time, and ``memory_allocated`` / ``max_memory_allocated``
+        are allocator-side bookkeeping (updated at alloc/free issue time),
+        so they're correct without a barrier."""
         if self.finalized:
             return
         if not torch.cuda.is_available():
             return
-        torch.cuda.synchronize()
         rec: dict[str, Any] = {
             "allocated_gb": torch.cuda.memory_allocated() / 1e9,
             "max_allocated_gb": torch.cuda.max_memory_allocated() / 1e9,
