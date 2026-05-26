@@ -411,13 +411,14 @@ final validation.**
 - `examples/train/run.sh` — `PYTORCH_CUDA_ALLOC_CONF`.
 - New tests under `fastvideo/tests/training/streaming/`.
 
-## 10. Status — Phases 0 & 1 implemented and validated on 5B / 4×H200
+## 10. Status — Phases 0, 1 validated on 5B / 4×H200; Phase 2 implemented (not yet GPU-validated)
 
-Validated on a fresh 4× H200 SXM box with the Wan 2.2 TI2V 5B model at
-24fps × 121 frames × 704×1280, `sp_size=4`, `hsdp_shard_dim=4`,
-`CheckpointType.FULL` (recompute, no CPU offload — `full_offload` is what
-Phase 2 will add). Probe outputs: `probe_5B_121f_run4/{layer_trace.csv,
-phase_memory.json}`.
+Phases 0 and 1 are landed and validated on a 4× H200 SXM box with the
+Wan 2.2 TI2V 5B model at 24fps × 121 frames × 704×1280, `sp_size=4`,
+`hsdp_shard_dim=4`, `CheckpointType.FULL` (recompute, no CPU offload).
+Probe outputs: `probe_5B_121f_run4/{layer_trace.csv, phase_memory.json}`.
+
+Phase 2 is landed at the code level but not yet exercised on a GPU host.
 
 ### What landed
 
@@ -553,15 +554,73 @@ prefetch queue. The Phase 2/3 design (FILO offload of block inputs +
 one-deep prefetch on a dedicated copy stream) is the correct model;
 nothing weirder is happening underneath.
 
-### Known caveats for Phase 2 planning
+### Phase 2 — code landed, awaiting GPU validation
 
-- **Baseline mode mismatch.** The 43.56 GB plan baseline assumes a
-  `full_offload` mode (`save_on_cpu` of every checkpointed tensor)
-  that is **not** in the repo. Today's `CheckpointType` only has
-  `FULL` / `OPS` / `BLOCK_SKIP`. Phase 2 needs to first add the
-  `full_offload` baseline (so we have something to streaming-improve),
-  then the streamed variant.
-- **Resolution gap.** This run was 704×1280 to keep the experiment
+Two new modes are wired into `apply_activation_checkpointing` alongside
+the existing `FULL` / `OPS` / `BLOCK_SKIP`:
+
+- `CheckpointType.FULL_OFFLOAD` — naive baseline, wraps each block as
+  `offload_wrapper(checkpoint_wrapper(block, preserve_rng_state=False))`
+  using PyTorch's existing `offload_wrapper` (H2D / D2H on the compute
+  stream, no overlap). This is the strawman the streamed mode needs to
+  beat, and is what the §3 "43.56 GB" baseline number was supposed to
+  measure against. (Closes the "baseline mode mismatch" caveat from
+  Phase 1.)
+- `CheckpointType.STREAMED_OFFLOAD` — Phase 2 deliverable, wraps as
+  `StreamedOffloadCheckpointWrapper(checkpoint_wrapper(block,
+  preserve_rng_state=False))`. H2D and D2H run on a dedicated
+  `torch.cuda.Stream` (priority −1) shared across all blocks on a device.
+
+**Design choice vs the plan in §3.** The plan introduced the
+`BlockRegistry` only in Phase 3. In Phase 2 we already build it — empty
+of prefetch state for now — so Phase 3 is an additive change rather
+than a rewrite. Concretely:
+
+- `BlockRegistry.records[block_idx]` holds the staged pack records
+  (`cpu` pinned buffer + `pack_event`). Phase 2 reads it during the
+  on-demand unpack; Phase 3 will read it ahead of time in the prefetcher.
+- `BlockRegistry.live_buffers` / `restore_events` are scaffolded but
+  unused by Phase 2. The unpack hook already has the "if a Phase 3
+  prefetcher pre-restored this slot, take it from `live_buffers`
+  instead of restoring on demand" branch — wiring Phase 3 is a matter
+  of populating those dicts, not changing the unpack contract.
+- `BlockRegistry.fwd_order` is populated on every `new_call(block_idx)`
+  so Phase 3 has the forward order ready for reverse iteration.
+
+`StreamedOffloadCheckpointWrapper` composes around the existing
+`checkpoint_wrapper`, which preserves the `_CHECKPOINT_PREFIX` on the
+state_dict, so saved checkpoints are unchanged. If we later want a pure
+streaming variant (no recompute), we'll need to add the prefix handling
+inside the wrapper.
+
+**Risks addressed in code (vs §6 of this plan):**
+
+| §6 risk | Phase 2 handling |
+|---|---|
+| Pack races with kernel completion | `copy_stream.wait_stream(current_stream)` before the copy + `non_blocking=True` H2D on pinned memory |
+| GPU source buffer freed before H2D drains | `t.record_stream(copy_stream)` in the pack hook |
+| Restored buffer recycled before backward consumes it | `gpu.record_stream(compute_stream)` in the unpack hook |
+| Recompute re-fires saved_tensors_hooks | The hook is installed via a `with` block inside the wrapper's forward only. Recompute happens during backward, outside that context, so the inner `checkpoint_wrapper`'s recomputed activations are not packed. No `disable_saved_tensors_hooks()` needed. |
+| Allocator fragmentation from many small CPU pins | Inherent to `pin_memory=True`; the run script will need `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` (deferred to Phase 4) |
+
+**Tests added** in `fastvideo/tests/training/streaming/`:
+
+- `test_async_save_hook_correctness.py` — bit-exact pack/unpack roundtrip
+  across fp32 / bf16 / fp16 and several shapes, CPU-tensor and zero-size
+  passthroughs, multi-pack slot ordering, and a forward-backward
+  transparency check against an unwrapped module.
+- `test_streamed_offload_loss_match.py` — 1-step integration test that
+  builds a stack of MLP blocks, wraps it with FULL / FULL_OFFLOAD /
+  STREAMED_OFFLOAD via `apply_activation_checkpointing`, and asserts
+  bit-identical loss + gradients across the modes.
+
+Both gated on `torch.cuda.is_available()`; not yet executed on the
+4×H200 box.
+
+### Open caveats (unchanged from Phase 1 unless noted)
+
+- ~~**Baseline mode mismatch** — closed by Phase 2's `FULL_OFFLOAD` mode.~~
+- **Resolution gap.** The 5B run was 704×1280 to keep the experiment
   cheap. Phase 5 acceptance numbers in §3 (43.56 → ≤ 36 GB peak) were
   benchmarked at a different size — Phase 5 needs to be re-stated for
   whichever final resolution the 5B prototype settles on, or rerun at
@@ -577,17 +636,200 @@ nothing weirder is happening underneath.
 
 | File | Purpose |
 |---|---|
-| `fastvideo/training/memory_probe.py` | Probe class, env-var entry point, CSV/JSON writers |
-| `fastvideo/train/trainer.py` | Probe install + per-step snap/step_begin/step_end |
-| `fastvideo/training/training_pipeline.py` | Legacy snap sites (kept; no-op when inactive) |
+| `fastvideo/training/memory_probe.py` | Probe class, env-var entry point, CSV/JSON writers (Phase 1) |
+| `fastvideo/train/trainer.py` | Probe install + per-step snap/step_begin/step_end (Phase 1) |
+| `fastvideo/training/training_pipeline.py` | Legacy snap sites (kept; no-op when inactive) (Phase 1) |
 | `fastvideo/train/models/wan/wan.py` | Phase 0 VAE-drop gate + stub reading real VAE config.json |
-| `fastvideo/train/utils/training_config.py` | `DataConfig.load_vae_into_training` flag |
-| `scripts/4k_milestone/make_synthetic_5b_data.py` | Added rung 6 (704×1280 × 121f) |
-| `probe_5B_121f_run4/{layer_trace.csv, phase_memory.json}` | Captured outputs |
+| `fastvideo/train/utils/training_config.py` | `DataConfig.load_vae_into_training` flag (Phase 0) |
+| `scripts/4k_milestone/make_synthetic_5b_data.py` | Added rung 6 (704×1280 × 121f) (Phase 1) |
+| `probe_5B_121f_run4/{layer_trace.csv, phase_memory.json}` | Captured outputs (Phase 1) |
+| `fastvideo/training/activation_streaming.py` | **new (Phase 2)** — `get_copy_stream`, `BlockRegistry`, `AsyncCpuSaveHook`, `StreamedOffloadCheckpointWrapper` |
+| `fastvideo/training/activation_checkpoint.py` | **Phase 2** — `FULL_OFFLOAD` + `STREAMED_OFFLOAD` enum entries; block-walker now takes a `wrapper` callable |
+| `fastvideo/tests/training/streaming/{__init__.py, test_async_save_hook_correctness.py, test_streamed_offload_loss_match.py}` | **new (Phase 2)** — pack/unpack unit tests + 1-step loss-match integration test |
 
-### Next
+### Phase 2 GPU validation plan
 
-Phase 2: implement `full_offload` baseline + `StreamedOffloadCheckpointWrapper`
-on a dedicated copy stream (per §3). Re-run this same probe under the
-new mode to confirm the access pattern stays FILO and the queue depth
-never exceeds 1 layer in flight.
+Everything below is meant to be runnable on a fresh 4× H200 SXM box by an
+agent that has not seen this conversation. Same rig as Phase 1
+(5B / 4×H200 / 24fps × 121 frames × 704×1280).
+
+#### Step 1 — Run the new test suite
+
+```bash
+cd /workspace/FastVideo
+source /workspace/venv/main/bin/activate
+pytest fastvideo/tests/training/streaming/ -vs 2>&1 \
+  | tee /workspace/FastVideo/probe_out/streaming_pytest.log
+```
+
+Pass criteria (all must hold):
+- `test_async_save_hook_correctness.py` — every parametrised case passes.
+  Failure here means the pack/unpack pair is not bit-exact; likely
+  causes are stream-ordering bugs (forgot `wait_event` on pack_event in
+  unpack) or wrong dtype/layout in the pinned host buffer.
+- `test_streamed_offload_loss_match.py::test_streamed_offload_matches_full_offload_bitexact`
+  — STREAMED_OFFLOAD vs FULL_OFFLOAD bit-exact. Failure here is the
+  load-bearing signal that the streamed path is doing something
+  numerically different from the naive offload baseline — investigate
+  before doing the bigger probe runs.
+- `test_streamed_offload_matches_full_recompute_bitexact` may fail at
+  bit-exact equality if cuBLAS isn't deterministic for the test shapes;
+  in that case relax to `torch.allclose(..., atol=1e-5, rtol=1e-5)` and
+  document it. Not a blocker.
+
+Artifact to collect: `streaming_pytest.log`.
+
+#### Step 2 — Capture the FULL_OFFLOAD baseline probe
+
+This is the naive-offload baseline the plan referred to as "43.56 GB" —
+we don't actually have a real measurement on this rig yet; this step
+produces one.
+
+```bash
+mkdir -p /workspace/FastVideo/probe_out/full_offload
+cat > /tmp/_probe_full_offload.sh <<'EOF'
+#!/bin/bash
+export HF_HOME=/workspace/.hf_home
+export FASTVIDEO_MEM_PROBE_STEPS=2
+export FASTVIDEO_MEM_PROBE_DIR=/workspace/FastVideo/probe_out/full_offload
+export WANDB_MODE=disabled
+export NUM_GPUS=4
+cd /workspace/FastVideo
+source /workspace/venv/main/bin/activate
+exec bash examples/train/run.sh \
+    examples/train/configs/fine_tuning/wan/t2v_4k.yaml \
+    --models.student.init_from Wan-AI/Wan2.2-TI2V-5B-Diffusers \
+    --pipeline.flow_shift 5.0 \
+    --training.distributed.num_gpus 4 \
+    --training.distributed.sp_size 4 \
+    --training.distributed.hsdp_shard_dim 4 \
+    --training.data.data_path data/synthetic_5b_121f \
+    --training.data.num_height 704 --training.data.num_width 1280 \
+    --training.data.num_frames 121 --training.data.num_latent_t 31 \
+    --training.model.enable_gradient_checkpointing_type full_offload \
+    --training.loop.max_train_steps 2 \
+    --training.checkpoint.resume_from_checkpoint ""
+EOF
+chmod +x /tmp/_probe_full_offload.sh
+nohup /tmp/_probe_full_offload.sh \
+  > /workspace/FastVideo/probe_out/full_offload/train.log 2>&1 &
+```
+
+Wait for the run to finish (≈2–3 min for 2 steps). Confirm both probe
+files were written:
+
+```bash
+ls /workspace/FastVideo/probe_out/full_offload/{layer_trace.csv,phase_memory.json}
+```
+
+Artifacts to collect:
+- `probe_out/full_offload/layer_trace.csv`
+- `probe_out/full_offload/phase_memory.json`
+- `probe_out/full_offload/train.log`
+
+#### Step 3 — Capture the STREAMED_OFFLOAD probe
+
+Identical to Step 2 except for the directory and the
+`enable_gradient_checkpointing_type` flag:
+
+```bash
+mkdir -p /workspace/FastVideo/probe_out/streamed_offload
+cat > /tmp/_probe_streamed_offload.sh <<'EOF'
+#!/bin/bash
+export HF_HOME=/workspace/.hf_home
+export FASTVIDEO_MEM_PROBE_STEPS=2
+export FASTVIDEO_MEM_PROBE_DIR=/workspace/FastVideo/probe_out/streamed_offload
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export WANDB_MODE=disabled
+export NUM_GPUS=4
+cd /workspace/FastVideo
+source /workspace/venv/main/bin/activate
+exec bash examples/train/run.sh \
+    examples/train/configs/fine_tuning/wan/t2v_4k.yaml \
+    --models.student.init_from Wan-AI/Wan2.2-TI2V-5B-Diffusers \
+    --pipeline.flow_shift 5.0 \
+    --training.distributed.num_gpus 4 \
+    --training.distributed.sp_size 4 \
+    --training.distributed.hsdp_shard_dim 4 \
+    --training.data.data_path data/synthetic_5b_121f \
+    --training.data.num_height 704 --training.data.num_width 1280 \
+    --training.data.num_frames 121 --training.data.num_latent_t 31 \
+    --training.model.enable_gradient_checkpointing_type streamed_offload \
+    --training.loop.max_train_steps 2 \
+    --training.checkpoint.resume_from_checkpoint ""
+EOF
+chmod +x /tmp/_probe_streamed_offload.sh
+nohup /tmp/_probe_streamed_offload.sh \
+  > /workspace/FastVideo/probe_out/streamed_offload/train.log 2>&1 &
+```
+
+The `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` line is added on
+this run because the streamed path will exercise the caching allocator
+more aggressively (D2H buffers allocated/freed every block, every step).
+Without it, fragmentation may inflate reserved memory and obscure the
+real `allocated_gb` comparison.
+
+Artifacts to collect:
+- `probe_out/streamed_offload/layer_trace.csv`
+- `probe_out/streamed_offload/phase_memory.json`
+- `probe_out/streamed_offload/train.log`
+
+#### Step 4 — Evaluate
+
+Compare the two runs against the Phase 1 baseline (FULL recompute):
+
+| Metric (rank 0, step 1 steady state) | FULL recompute (Phase 1) | FULL_OFFLOAD (new) | STREAMED_OFFLOAD (new) |
+|---|---:|---:|---:|
+| P5_bwd_peak `max_alloc` GB | 23.40 | ? | ? |
+| P7_opt_done `max_alloc` GB | 25.11 | ? | ? |
+| Step wall-time (from `train.log`) | 87.2 s | ? | ? |
+
+Pass criteria for Phase 2 acceptance:
+
+1. **Both runs complete 2 steps without OOM, hangs, or NaN losses.**
+   Check `train.log` for "step=2" and a finite loss value.
+2. **STREAMED_OFFLOAD `max_alloc` ≤ FULL_OFFLOAD `max_alloc`** at every
+   probe phase. The streamed path must never make peak *worse* than the
+   naive baseline — Phase 2's stated acceptance is "identical GPU peak
+   to full_offload, slightly lower if overlap helps".
+3. **Loss at step 2 matches between FULL_OFFLOAD and STREAMED_OFFLOAD
+   within 1e-5.** Read both `train.log`s; the `loss=` value after step 2
+   should agree to at least 5 decimal places. Larger drift indicates a
+   non-transparent pack/unpack.
+4. **Layer-trace access pattern stays FILO.** In each
+   `layer_trace.csv`, `fwd_or_bwd == 'bwd'` rows should appear in
+   strictly decreasing `layer_idx` order (29 → 0). Anything else means
+   the model isn't running backward in reverse forward order, which
+   breaks the Phase 3 prefetch design.
+5. **STREAMED_OFFLOAD step time ≤ 1.20 × FULL_OFFLOAD step time** at
+   the per-step level. (Phase 5 will tighten this; for Phase 2 we just
+   want assurance the streamed path isn't catastrophically slower.)
+
+Failure-mode triage:
+
+- *STREAMED_OFFLOAD OOMs while FULL_OFFLOAD did not.* Most likely a
+  missing `record_stream` causing the allocator to keep both source and
+  restored buffers alive, or `_PACK_TAG`-tagged tuples slipping through
+  unpack without freeing the CPU record. Check
+  `BlockRegistry.records[*]` size after backward; it should be empty.
+- *Loss drifts between FULL_OFFLOAD and STREAMED_OFFLOAD.* Almost
+  certainly a stream-ordering bug — either pack didn't wait on
+  compute_stream before H2D, or unpack didn't wait on `pack_event`
+  before D2H. Reproduce with `test_async_save_hook_correctness.py`
+  using larger tensors (numel ~10^7) — race becomes visible.
+- *STREAMED_OFFLOAD step time is much worse than FULL_OFFLOAD.* The
+  copy stream is being starved (FSDP all-gather priority) or H2D /
+  D2H is serialising on the compute stream. Capture an `nsys profile`
+  for one step and check that `copy_stream` activity overlaps with
+  kernels — Phase 2's `priority=-1` on the copy stream should prevent
+  starvation, but it's a knob worth verifying.
+
+#### Step 5 — Report back
+
+Write findings into the §10 "Phase 2 — code landed, awaiting GPU
+validation" subsection (renaming it to "Phase 2 — validated" or "Phase
+2 — failed acceptance, investigating"). Quote the actual numbers from
+the table in Step 4. Attach the four probe artifacts and the pytest log.
+
+If all five criteria pass, the design is sound and the next work item is
+Phase 3 (one-layer-ahead prefetch scheduler).

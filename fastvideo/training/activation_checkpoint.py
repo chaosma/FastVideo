@@ -2,7 +2,11 @@ import collections
 from enum import Enum
 
 import torch
-from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (checkpoint_wrapper)
+from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+    checkpoint_wrapper, offload_wrapper)
+
+from fastvideo.training.activation_streaming import (
+    StreamedOffloadCheckpointWrapper)
 
 TRANSFORMER_BLOCK_NAMES = [
     "blocks",
@@ -19,6 +23,11 @@ class CheckpointType(str, Enum):
     FULL = "full"
     OPS = "ops"
     BLOCK_SKIP = "block_skip"
+    # Naive offload baseline -- uses PyTorch's offload_wrapper, so H2D / D2H
+    # runs on the compute stream (no overlap).
+    FULL_OFFLOAD = "full_offload"
+    # Phase 2 streamed-offload mode -- H2D / D2H on a dedicated copy stream.
+    STREAMED_OFFLOAD = "streamed_offload"
 
 
 _SELECTIVE_ACTIVATION_CHECKPOINTING_OPS = {
@@ -38,6 +47,12 @@ def apply_activation_checkpointing(module: torch.nn.Module,
         module = _apply_activation_checkpointing_ops(module, _SELECTIVE_ACTIVATION_CHECKPOINTING_OPS)
     elif checkpointing_type == CheckpointType.BLOCK_SKIP:
         module = _apply_activation_checkpointing_blocks(module, n_layer)
+    elif checkpointing_type == CheckpointType.FULL_OFFLOAD:
+        module = _apply_activation_checkpointing_blocks(
+            module, wrapper=_wrap_offload)
+    elif checkpointing_type == CheckpointType.STREAMED_OFFLOAD:
+        module = _apply_activation_checkpointing_blocks(
+            module, wrapper=_wrap_streamed_offload)
     else:
         raise ValueError(
             f"Checkpointing type '{checkpointing_type}' not supported. Supported types are {CheckpointType.__members__.keys()}"
@@ -45,7 +60,23 @@ def apply_activation_checkpointing(module: torch.nn.Module,
     return module
 
 
-def _apply_activation_checkpointing_blocks(module: torch.nn.Module, n_layer: int | None = None) -> torch.nn.Module:
+def _wrap_recompute(block: torch.nn.Module) -> torch.nn.Module:
+    return checkpoint_wrapper(block, preserve_rng_state=False)
+
+
+def _wrap_offload(block: torch.nn.Module) -> torch.nn.Module:
+    return offload_wrapper(checkpoint_wrapper(block, preserve_rng_state=False))
+
+
+def _wrap_streamed_offload(block: torch.nn.Module) -> torch.nn.Module:
+    return StreamedOffloadCheckpointWrapper(
+        checkpoint_wrapper(block, preserve_rng_state=False))
+
+
+def _apply_activation_checkpointing_blocks(
+        module: torch.nn.Module,
+        n_layer: int | None = None,
+        wrapper=_wrap_recompute) -> torch.nn.Module:
     applied = False
     for transformer_block_name in TRANSFORMER_BLOCK_NAMES:
         blocks: torch.nn.Module = getattr(module, transformer_block_name, None)
@@ -53,7 +84,7 @@ def _apply_activation_checkpointing_blocks(module: torch.nn.Module, n_layer: int
             continue
         for index, (layer_id, block) in enumerate(blocks.named_children()):
             if n_layer is None or index % n_layer == 0:
-                block = checkpoint_wrapper(block, preserve_rng_state=False)
+                block = wrapper(block)
                 blocks.register_module(layer_id, block)
         applied = True
     if not applied:
