@@ -7,6 +7,7 @@
 
 NUM_FRAMES=${NUM_FRAMES:-17}
 NUM_GPUS=${NUM_GPUS:-4}
+MAX_STEPS=${MAX_STEPS:-1}
 
 # Wan VAE temporal compression = 4; num_frames must satisfy (n-1) % 4 == 0.
 NUM_LATENT_T=$(((NUM_FRAMES - 1) / 4 + 1))
@@ -54,7 +55,9 @@ fi
 # syncs would perturb step time.
 MEM_PROBE_ENABLE=${MEM_PROBE_ENABLE:-1}
 MEM_PROBE_DIR=${MEM_PROBE_DIR:-logs/mem_probe_${TAG}}
-MEM_PROBE_STEPS=${MEM_PROBE_STEPS:-1}
+# Default to MAX_STEPS so the probe captures every training step and
+# its phase snapshots get written even on multi-step runs.
+MEM_PROBE_STEPS=${MEM_PROBE_STEPS:-${MAX_STEPS}}
 MEM_PROBE_TOPK=${MEM_PROBE_TOPK:-0}
 MEM_PROBE_ALL_RANKS=${MEM_PROBE_ALL_RANKS:-0}
 if [ "${MEM_PROBE_ENABLE}" = "0" ]; then
@@ -90,7 +93,7 @@ FASTVIDEO_ACTIVATION_TRACE="${TRACE_ENABLE}" \
   --training.data.num_width 3840 \
   --training.data.num_frames "${NUM_FRAMES}" \
   --training.data.num_latent_t "${NUM_LATENT_T}" \
-  --training.loop.max_train_steps 1 \
+  --training.loop.max_train_steps "${MAX_STEPS}" \
   --training.checkpoint.training_state_checkpointing_steps "${SAVE_CHECKPOINT_STEPS}" \
   --training.checkpoint.output_dir "outputs/wan_finetune_4k_14b_trace_${TAG}" \
   --training.tracker.run_name "wan_4k_14b_trace_${TAG}" \
