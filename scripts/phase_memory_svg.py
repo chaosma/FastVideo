@@ -92,8 +92,7 @@ def _components(rec: dict[str, Any]) -> dict[str, float]:
 
 
 def render(phase_memory_path: Path, *, title: str, subtitle: str,
-           highlight_phase: str = "P5_bwd_peak",
-           legend_phase: str = "P4_fwd_end") -> str:
+           highlight_phase: str = "P5_bwd_peak") -> str:
     data = json.loads(phase_memory_path.read_text())
     snap = data[next(iter(data))]   # first (only) step
     phases = list(snap.keys())
@@ -277,32 +276,36 @@ def render(phase_memory_path: Path, *, title: str, subtitle: str,
                        fill="#374151"))
         return "".join(s)
 
-    # Show component values at the legend phase (default P4_fwd_end ---
-    # where the activation stash is cleanly resident, before backward
-    # starts releasing it). The transient burst is shown at the peak
-    # phase, since that's where it's the headline number.
-    legend_idx = (phases.index(legend_phase)
-                  if legend_phase in phases else peak_idx)
-    legend_row = rows[legend_idx]
-    peak_row = rows[peak_idx]
+    # Show each band's PEAK value across phases and the phase it occurs.
+    # A single-phase snapshot is misleading: e.g. grads are 0 at
+    # P4_fwd_end (before backward) but 7.1 GB at P5-P7, and the
+    # activation stash is maximal at P4. Per-band max + phase tag keeps
+    # every band honest (the bands don't all peak simultaneously).
+    def _band_vals(key: str) -> list[float]:
+        if key == "activations":
+            return [r["activations"] for r in rows]
+        return [r["components"].get(key, 0.0) for r in rows]
+
+    def _max_and_phase(vals: list[float]) -> tuple[float, str]:
+        mx = max(vals)
+        arg = vals.index(mx)
+        return mx, pretty.get(phases[arg], (phases[arg],))[0]
+
     row_y = leg_y + 16
     for key, name in LAYER_ORDER:
-        if key == "activations":
-            val = legend_row["activations"]
-        else:
-            val = legend_row["components"].get(key, 0.0)
+        mx, ph = _max_and_phase(_band_vals(key))
+        tag = f" @ {ph}" if mx > 0.05 else ""
         parts.append(_legend_row(row_y, COLORS[key], name,
-                                 f"{val:.1f} GB"))
+                                 f"{mx:.1f} GB{tag}"))
         row_y += 22
+    t_mx, t_ph = _max_and_phase([r["transient"] for r in rows])
     parts.append(_legend_row(row_y, COLORS["transient"],
-                             "transient burst @ peak",
-                             f"{peak_row['transient']:.1f} GB"))
+                             "transient burst",
+                             f"{t_mx:.1f} GB @ {t_ph}"))
     row_y += 22
 
     parts.append(_text(leg_x, row_y + 12,
-                       f"(static + stash @ {pretty.get(legend_phase, (legend_phase,))[0]} "
-                       f"{pretty.get(legend_phase, (legend_phase,''))[1]}; "
-                       f"burst @ {pretty.get(highlight_phase, (highlight_phase,))[0]})",
+                       "(peak per band + phase; bands don't all peak together)",
                        size=10, fill="#6b7280"))
 
     # Bottom strip: phase memory table.
@@ -326,16 +329,13 @@ def main() -> None:
     ap.add_argument("--title", required=True)
     ap.add_argument("--subtitle", default="")
     ap.add_argument("--highlight-phase", default="P5_bwd_peak",
-                    help="phase used for the peak line + transient value")
-    ap.add_argument("--legend-phase", default="P4_fwd_end",
-                    help="phase whose static+stash breakdown the legend shows")
+                    help="phase used for the peak line + x-axis bold")
     ap.add_argument("--out", required=True, type=Path)
     args = ap.parse_args()
 
     svg = render(args.phase_memory, title=args.title,
                  subtitle=args.subtitle,
-                 highlight_phase=args.highlight_phase,
-                 legend_phase=args.legend_phase)
+                 highlight_phase=args.highlight_phase)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(svg)
     print(f"wrote {args.out}")
