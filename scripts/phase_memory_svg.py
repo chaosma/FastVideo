@@ -48,12 +48,12 @@ COLORS = {
 }
 
 LAYER_ORDER = [
-    ("adam",        "Adam m + v"),
-    ("master",      "fp32 master"),
-    ("weights",     "bf16 weights"),
-    ("grads",       "bf16 grads"),
+    ("adam",        "Adam m+v (fp32)"),
+    ("weights",     "params (fp32 master)"),
+    ("master",      "fp32 master copy"),
+    ("grads",       "grads (fp32)"),
     ("vae",         "VAE"),
-    ("activations", "Activations stash"),
+    ("activations", "activation stash"),
 ]
 
 
@@ -71,23 +71,29 @@ def _text(x: float, y: float, content: str, *, size: int = 12,
 
 
 def _components(rec: dict[str, Any]) -> dict[str, float]:
-    """Pull the named category bytes out of one phase snapshot."""
+    """Pull the named category bytes out of one phase snapshot.
+
+    Note on labels: the probe dumps every ``model.parameter()`` into its
+    ``weights_bf16`` bucket regardless of dtype. In this training config
+    the params are fp32 and serve as the master copy (bf16 is cast on the
+    fly inside forward, not resident), so we surface that bucket as
+    ``weights`` / "params (fp32 master)". The separate ``master_fp32``
+    bucket is only non-zero when the optimizer state carries an explicit
+    fp32 master tensor --- usually 0 here. Grads are read directly from
+    ``grads_bf16`` at every phase (populated once backward runs)."""
     cats = rec.get("categories_gb") or {}
-    weights_bf16 = float(cats.get("weights_bf16", 0.0))
     return {
         "adam":    float(cats.get("adam_m", 0.0)) + float(cats.get("adam_v", 0.0)),
         "master":  float(cats.get("master_fp32", 0.0)),
-        "weights": weights_bf16,
-        # bf16 grads only after backward --- categorize them under "grads".
-        # The probe lumps them in weights_bf16 if mixed-precision uses bf16
-        # accumulators; the activation/transient bucket absorbs any drift.
-        "grads":   0.0,
+        "weights": float(cats.get("weights_bf16", 0.0)),
+        "grads":   float(cats.get("grads_bf16", 0.0)),
         "vae":     float(cats.get("vae", 0.0)),
     }
 
 
 def render(phase_memory_path: Path, *, title: str, subtitle: str,
-           highlight_phase: str = "P5_bwd_peak") -> str:
+           highlight_phase: str = "P5_bwd_peak",
+           legend_phase: str = "P4_fwd_end") -> str:
     data = json.loads(phase_memory_path.read_text())
     snap = data[next(iter(data))]   # first (only) step
     phases = list(snap.keys())
@@ -101,12 +107,11 @@ def render(phase_memory_path: Path, *, title: str, subtitle: str,
         allocated = float(rec["allocated_gb"])
         max_alloc = float(rec["max_allocated_gb"])
         reserved = float(rec["reserved_gb"])
-        # If allocated is below summed components (rounding / VAE
-        # cleared / weights gathered transiently), clamp activations >= 0.
+        # Activations = whatever's allocated beyond the named buckets
+        # (the saved-for-backward stash + framework residual). Clamp >= 0.
+        # Grads are now read directly from grads_bf16 per phase, so they
+        # no longer leak into this residual.
         named_sum = sum(comp.values())
-        # Grads after backward are bf16; the memory probe lumps them in
-        # weights_bf16 after P5. Detect this and re-split at P6+.
-        # Use a heuristic: if weights doubled between P4 and P6, split.
         rows.append({
             "phase":     ph,
             "components": comp,
@@ -117,20 +122,6 @@ def render(phase_memory_path: Path, *, title: str, subtitle: str,
             "activations": max(0.0, allocated - named_sum),
             "transient": max(0.0, max_alloc - allocated),
         })
-
-    # Promote part of "weights" to "grads" once weight value spikes
-    # post-backward (P6 onwards), so the chart shows grads accumulating.
-    weights_p4 = next((r["components"]["weights"] for r in rows
-                       if r["phase"] == "P4_fwd_end"), 0.0)
-    for r in rows:
-        if r["phase"] in {"P6_post_bwd", "P7_opt_done", "P0_next"}:
-            w = r["components"]["weights"]
-            if w > weights_p4 * 1.5:
-                # The probe's weights_bf16 bucket includes grads after bwd.
-                r["components"]["grads"] = w - weights_p4
-                r["components"]["weights"] = weights_p4
-                r["named_sum"] = sum(r["components"].values())
-                r["activations"] = max(0.0, r["allocated"] - r["named_sum"])
 
     # Y-axis scale.
     y_max = max(H200_CAP_GB, max(r["max_allocated"] for r in rows) * 1.05)
@@ -286,25 +277,32 @@ def render(phase_memory_path: Path, *, title: str, subtitle: str,
                        fill="#374151"))
         return "".join(s)
 
-    # Use the peak phase for displayed numbers.
+    # Show component values at the legend phase (default P4_fwd_end ---
+    # where the activation stash is cleanly resident, before backward
+    # starts releasing it). The transient burst is shown at the peak
+    # phase, since that's where it's the headline number.
+    legend_idx = (phases.index(legend_phase)
+                  if legend_phase in phases else peak_idx)
+    legend_row = rows[legend_idx]
     peak_row = rows[peak_idx]
     row_y = leg_y + 16
     for key, name in LAYER_ORDER:
         if key == "activations":
-            val = peak_row["activations"]
+            val = legend_row["activations"]
         else:
-            val = peak_row["components"].get(key, 0.0)
+            val = legend_row["components"].get(key, 0.0)
         parts.append(_legend_row(row_y, COLORS[key], name,
                                  f"{val:.1f} GB"))
         row_y += 22
     parts.append(_legend_row(row_y, COLORS["transient"],
-                             "Transient burst",
+                             "transient burst @ peak",
                              f"{peak_row['transient']:.1f} GB"))
     row_y += 22
 
     parts.append(_text(leg_x, row_y + 12,
-                       f"(values shown at {pretty.get(highlight_phase, (highlight_phase,))[0]}: "
-                       f"{pretty.get(highlight_phase, (highlight_phase,''))[1]})",
+                       f"(static + stash @ {pretty.get(legend_phase, (legend_phase,))[0]} "
+                       f"{pretty.get(legend_phase, (legend_phase,''))[1]}; "
+                       f"burst @ {pretty.get(highlight_phase, (highlight_phase,))[0]})",
                        size=10, fill="#6b7280"))
 
     # Bottom strip: phase memory table.
@@ -327,13 +325,17 @@ def main() -> None:
     ap.add_argument("--phase-memory", required=True, type=Path)
     ap.add_argument("--title", required=True)
     ap.add_argument("--subtitle", default="")
-    ap.add_argument("--highlight-phase", default="P5_bwd_peak")
+    ap.add_argument("--highlight-phase", default="P5_bwd_peak",
+                    help="phase used for the peak line + transient value")
+    ap.add_argument("--legend-phase", default="P4_fwd_end",
+                    help="phase whose static+stash breakdown the legend shows")
     ap.add_argument("--out", required=True, type=Path)
     args = ap.parse_args()
 
     svg = render(args.phase_memory, title=args.title,
                  subtitle=args.subtitle,
-                 highlight_phase=args.highlight_phase)
+                 highlight_phase=args.highlight_phase,
+                 legend_phase=args.legend_phase)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(svg)
     print(f"wrote {args.out}")
