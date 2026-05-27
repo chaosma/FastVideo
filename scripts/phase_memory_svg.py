@@ -294,9 +294,13 @@ def render(phase_memory_path: Path, *, title: str, subtitle: str,
     row_y = leg_y + 16
     for key, name in LAYER_ORDER:
         mx, ph = _max_and_phase(_band_vals(key))
-        tag = f" @ {ph}" if mx > 0.05 else ""
+        # Skip bands that are zero in every phase (e.g. the separate
+        # fp32-master bucket when params already are the master, or a
+        # skipped VAE) --- they only clutter the legend.
+        if mx <= 0.05:
+            continue
         parts.append(_legend_row(row_y, COLORS[key], name,
-                                 f"{mx:.1f} GB{tag}"))
+                                 f"{mx:.1f} GB @ {ph}"))
         row_y += 22
     t_mx, t_ph = _max_and_phase([r["transient"] for r in rows])
     parts.append(_legend_row(row_y, COLORS["transient"],
