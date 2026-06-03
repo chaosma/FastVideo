@@ -28,6 +28,14 @@ NODE_RANK="${NODE_RANK:-0}"
 MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 MASTER_PORT="${MASTER_PORT:-29501}"
 export TOKENIZERS_PARALLELISM=false
+
+# ── CUDA caching allocator ───────────────────────────────────────
+# expandable_segments avoids fragmentation when STREAMED_OFFLOAD frees
+# and reallocates per-block restore buffers on every step. Harmless for
+# the non-streaming modes; opt-out by exporting it explicitly before
+# this script.
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+
 # ── W&B ──────────────────────────────────────────────────────────
 export WANDB_API_KEY="${WANDB_API_KEY:-}"
 export WANDB_MODE="${WANDB_MODE:-online}"

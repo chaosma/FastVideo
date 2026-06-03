@@ -1,4 +1,6 @@
 import collections
+import logging
+import os
 from enum import Enum
 
 import torch
@@ -7,6 +9,8 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 
 from fastvideo.training.activation_streaming import (
     StreamedOffloadCheckpointWrapper)
+
+logger = logging.getLogger(__name__)
 
 TRANSFORMER_BLOCK_NAMES = [
     "blocks",
@@ -51,8 +55,13 @@ def apply_activation_checkpointing(module: torch.nn.Module,
         module = _apply_activation_checkpointing_blocks(
             module, wrapper=_wrap_offload)
     elif checkpointing_type == CheckpointType.STREAMED_OFFLOAD:
-        module = _apply_activation_checkpointing_blocks(
-            module, wrapper=_wrap_streamed_offload)
+        effective = _maybe_fallback_streamed_to_full_offload()
+        if effective == CheckpointType.STREAMED_OFFLOAD:
+            module = _apply_activation_checkpointing_blocks(
+                module, wrapper=_wrap_streamed_offload)
+        else:
+            module = _apply_activation_checkpointing_blocks(
+                module, wrapper=_wrap_offload)
     else:
         raise ValueError(
             f"Checkpointing type '{checkpointing_type}' not supported. Supported types are {CheckpointType.__members__.keys()}"
@@ -71,6 +80,67 @@ def _wrap_offload(block: torch.nn.Module) -> torch.nn.Module:
 def _wrap_streamed_offload(block: torch.nn.Module) -> torch.nn.Module:
     return StreamedOffloadCheckpointWrapper(
         checkpoint_wrapper(block, preserve_rng_state=False))
+
+
+# Default per-local-rank pinned-host budget required by STREAMED_OFFLOAD on
+# the 14B target (≈68 GB stash + slack). On 5B this is well under the
+# default. Override via ``FASTVIDEO_STREAMED_OFFLOAD_MIN_HOST_GB``.
+_DEFAULT_STREAMED_HOST_GB_PER_RANK = 80.0
+
+
+def _read_meminfo_available_gb() -> float | None:
+    """Return host MemAvailable in GiB (Linux only). None if unavailable."""
+    try:
+        with open("/proc/meminfo", "r") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    kb = float(line.split()[1])
+                    return kb / (1024 * 1024)
+    except (FileNotFoundError, ValueError, IndexError):
+        return None
+    return None
+
+
+def _maybe_fallback_streamed_to_full_offload() -> "CheckpointType":
+    """Verify enough pinned host memory is available for STREAMED_OFFLOAD;
+    fall back to FULL_OFFLOAD with a warning otherwise.
+
+    Disabled entirely by setting ``FASTVIDEO_STREAMED_OFFLOAD_SKIP_HOST_CHECK=1``.
+    The threshold can be tuned with ``FASTVIDEO_STREAMED_OFFLOAD_MIN_HOST_GB``
+    (per local rank, in GiB).
+    """
+    if os.environ.get("FASTVIDEO_STREAMED_OFFLOAD_SKIP_HOST_CHECK") == "1":
+        return CheckpointType.STREAMED_OFFLOAD
+
+    avail_gb = _read_meminfo_available_gb()
+    if avail_gb is None:
+        # Non-Linux or unreadable /proc -- don't second-guess the user.
+        return CheckpointType.STREAMED_OFFLOAD
+
+    local_world_size = int(
+        os.environ.get("LOCAL_WORLD_SIZE")
+        or os.environ.get("NPROC_PER_NODE") or 1)
+    per_rank_gb = avail_gb / max(local_world_size, 1)
+
+    threshold = float(
+        os.environ.get("FASTVIDEO_STREAMED_OFFLOAD_MIN_HOST_GB")
+        or _DEFAULT_STREAMED_HOST_GB_PER_RANK)
+
+    if per_rank_gb >= threshold:
+        logger.info(
+            "STREAMED_OFFLOAD host-RAM check OK: %.1f GiB available / "
+            "%d local ranks = %.1f GiB per rank (threshold %.1f GiB).",
+            avail_gb, local_world_size, per_rank_gb, threshold)
+        return CheckpointType.STREAMED_OFFLOAD
+
+    logger.warning(
+        "STREAMED_OFFLOAD requires ~%.1f GiB of pinned host memory per "
+        "local rank, but only %.1f GiB is available (%.1f GiB total / "
+        "%d local ranks). Falling back to FULL_OFFLOAD. Set "
+        "FASTVIDEO_STREAMED_OFFLOAD_SKIP_HOST_CHECK=1 to override, or "
+        "FASTVIDEO_STREAMED_OFFLOAD_MIN_HOST_GB=<value> to retune.",
+        threshold, per_rank_gb, avail_gb, local_world_size)
+    return CheckpointType.FULL_OFFLOAD
 
 
 def _apply_activation_checkpointing_blocks(

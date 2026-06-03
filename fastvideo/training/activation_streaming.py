@@ -87,23 +87,41 @@ class _Record:
 
 
 class BlockRegistry:
-    """Per-copy-stream registry of staged pack records.
+    """Per-copy-stream registry of staged pack records and the Phase 3
+    one-layer-ahead prefetch scheduler.
 
-    Phase 2 uses ``records`` (the CPU staging buffers + pack events) during
-    on-demand unpack. ``live_buffers`` / ``restore_events`` / ``fwd_order``
-    are scaffolded here for the Phase 3 prefetch scheduler that follows.
+    Forward path
+        ``new_call(block_idx)`` is called at the entry of each forward of a
+        wrapped block, then ``register_pack`` is called once per saved
+        tensor by ``AsyncCpuSaveHook.pack``.
+
+    Backward path (Phase 3)
+        ``prefetch(block_idx)`` stages D2H for the recorded packs onto GPU
+        on the copy stream; the unpack hook then consumes from
+        ``live_buffers``. The ``prefetch_sem`` semaphore bounds the queue
+        to one in-flight neighbour at a time.
+
+    Cross-step lifecycle
+        ``begin_step`` resets per-step state without forgetting fwd_order;
+        Block ordering is stable across steps in a normal training loop.
     """
 
     def __init__(self, copy_stream: torch.cuda.Stream):
         self.copy_stream = copy_stream
         # block_idx -> list[_Record], ordered by pack call within the block.
         self.records: dict[int, list[_Record]] = {}
-        # Phase 3 fields (unused in Phase 2, kept so callers can opt in
-        # without changing the registry shape later).
-        self.live_buffers: dict[int, list[torch.Tensor]] = {}
+        # Restored GPU buffers, populated by prefetch(); consumed by unpack.
+        self.live_buffers: dict[int, list[torch.Tensor | None]] = {}
         self.restore_events: dict[int, torch.cuda.Event] = {}
+        # Forward execution order (first-seen). Reversed for backward driving.
         self.fwd_order: list[int] = []
         self._fwd_order_seen: set[int] = set()
+        # Semaphore bounding one in-flight prefetched neighbour at a time.
+        # Released by the post-bwd hook of the just-finished layer.
+        self.prefetch_sem = threading.Semaphore(1)
+        # Tracks which prefetches have acquired the semaphore so post-bwd
+        # can release exactly once per acquire.
+        self._prefetch_acquired: set[int] = set()
 
     def new_call(self, block_idx: int) -> None:
         """Reset per-call pack state for ``block_idx``.
@@ -124,6 +142,97 @@ class BlockRegistry:
 
     def consume(self, block_idx: int, slot: int) -> _Record:
         return self.records[block_idx][slot]
+
+    # ------------------------------------------------------------------
+    # Phase 3 — backward prefetch scheduler
+    # ------------------------------------------------------------------
+
+    def next_bwd_block(self, block_idx: int) -> int | None:
+        """Block that will run backward immediately after ``block_idx``.
+
+        Backward iterates ``fwd_order`` in reverse. Returns ``None`` once
+        ``block_idx`` is the last (= first-in-forward) block.
+        """
+        try:
+            pos = self.fwd_order.index(block_idx)
+        except ValueError:
+            return None
+        if pos == 0:
+            return None
+        return self.fwd_order[pos - 1]
+
+    def prefetch(self, block_idx: int, *, acquire_sem: bool) -> None:
+        """Stage D2H for every packed record of ``block_idx`` onto GPU.
+
+        Idempotent: a second call while live_buffers is still populated is
+        a no-op. If ``acquire_sem`` is True the call blocks until the
+        prefetch semaphore is free (post-bwd of the previously-finished
+        layer releases it).
+        """
+        if block_idx in self.live_buffers:
+            # Already prefetched (or no records).
+            return
+        records = self.records.get(block_idx)
+        if not records:
+            # Block packed no CUDA tensors (e.g. trivial passthrough).
+            self.live_buffers[block_idx] = []
+            return
+
+        if acquire_sem:
+            self.prefetch_sem.acquire()
+            self._prefetch_acquired.add(block_idx)
+
+        copy_stream = self.copy_stream
+        bufs: list[torch.Tensor | None] = [None] * len(records)
+        with torch.cuda.stream(copy_stream):
+            for slot, rec in enumerate(records):
+                if rec.cpu is None:
+                    # Slot already consumed by an out-of-band restore
+                    # (shouldn't happen in normal flow, but be defensive).
+                    continue
+                copy_stream.wait_event(rec.pack_event)
+                gpu = torch.empty(rec.shape,
+                                  dtype=rec.dtype,
+                                  device=rec.device)
+                gpu.copy_(rec.cpu, non_blocking=True)
+                bufs[slot] = gpu
+            restore_event = torch.cuda.Event()
+            restore_event.record(copy_stream)
+
+        self.live_buffers[block_idx] = bufs
+        self.restore_events[block_idx] = restore_event
+
+    def mark_active(self, block_idx: int) -> None:
+        """Called by pre-bwd: ``block_idx`` graduates from "prefetched
+        neighbour" to "active block being backpropagated".
+
+        Releases the prefetch semaphore so the next neighbour's prefetch
+        (kicked off later in the same pre-bwd hook) can proceed. Idempotent
+        for blocks that never held the semaphore (the very first block in
+        backward, which prefetched itself with ``acquire_sem=False``).
+        """
+        if block_idx in self._prefetch_acquired:
+            self._prefetch_acquired.discard(block_idx)
+            self.prefetch_sem.release()
+
+    def release_after_bwd(self, block_idx: int) -> None:
+        """Drop live_buffers, restore_event, and packed records for a block
+        whose backward just finished.
+
+        Compute-stream lifetimes are managed via ``record_stream`` in the
+        unpack hook, so dropping the Python references here is safe even
+        if the kernels are still running.
+        """
+        self.live_buffers.pop(block_idx, None)
+        self.restore_events.pop(block_idx, None)
+        # Defensive: if for some reason mark_active was never called,
+        # release here so a stuck semaphore doesn't poison the next step.
+        if block_idx in self._prefetch_acquired:
+            self._prefetch_acquired.discard(block_idx)
+            self.prefetch_sem.release()
+        # Clear the now-consumed CPU records to release pinned-host pages;
+        # future steps will re-pack and re-allocate.
+        self.records.pop(block_idx, None)
 
 
 def get_registry(device: torch.device | int | None = None) -> BlockRegistry:
@@ -193,23 +302,27 @@ class AsyncCpuSaveHook(saved_tensors_hooks):
                 # Passthrough for non-CUDA packs returned verbatim above.
                 return packed
             _, block_idx, slot = packed
-            rec = registry.consume(block_idx, slot)
-            compute = torch.cuda.current_stream(rec.device)
-            # If a Phase 3 prefetcher has already restored this slot, use it
-            # straight away; otherwise stage the D2H now.
+
+            # Phase 3 fast path: if a prefetcher has already restored
+            # this slot, take it without touching ``records`` -- the
+            # post-bwd hook may have already cleared records for the
+            # previous block.
             live = registry.live_buffers.get(block_idx)
             if live is not None and slot < len(live) and live[slot] is not None:
                 gpu = live[slot]
+                compute = torch.cuda.current_stream(gpu.device)
                 restore_event = registry.restore_events.get(block_idx)
                 if restore_event is not None:
                     compute.wait_event(restore_event)
                 gpu.record_stream(compute)
-                # Drop the live entry so the buffer can be released after
-                # backward consumes it.
+                # Drop the live entry so the buffer can be released as
+                # soon as backward kernels are done consuming it.
                 live[slot] = None  # type: ignore[index]
                 return gpu
 
             # Phase 2 path: on-demand restore on the copy stream.
+            rec = registry.consume(block_idx, slot)
+            compute = torch.cuda.current_stream(rec.device)
             copy_stream.wait_event(rec.pack_event)
             with torch.cuda.stream(copy_stream):
                 gpu = torch.empty(rec.shape,
@@ -242,18 +355,32 @@ def _next_block_idx() -> int:
 
 
 class StreamedOffloadCheckpointWrapper(torch.nn.Module):
-    """Install the async saved-tensors hook around an inner module's forward.
+    """Install the async saved-tensors hook around an inner module's forward,
+    plus the Phase 3 backward-driven prefetch scheduler.
 
     Compose as ``StreamedOffloadCheckpointWrapper(checkpoint_wrapper(block))``
     so the inner block's intermediates are recomputed (saving GPU memory)
     and only the block's external inputs flow through the offload hook --
     matching the design in §3 of ``memory_prefetch_plan.md``.
+
+    Backward scheduler
+        - ``full_backward_pre_hook``: fires before the wrapper's backward
+          kernels. If this is the first block in backward (last in
+          forward), prefetch its own saves so the about-to-run unpack
+          finds ``live_buffers`` populated. Then always kick off the
+          prefetch for the next block in the backward order.
+        - ``full_backward_hook``: fires after the wrapper's backward
+          finishes. Frees ``live_buffers`` for this block and releases
+          the prefetch semaphore.
     """
 
     def __init__(self, mod: torch.nn.Module):
         super().__init__()
         self._streamed_offload_inner = mod
         self._block_idx = _next_block_idx()
+        self._cached_registry: BlockRegistry | None = None
+        self.register_full_backward_pre_hook(self._streamed_pre_backward)
+        self.register_full_backward_hook(self._streamed_post_backward)
 
     def forward(self, *args, **kwargs):
         device: int | None = None
@@ -267,7 +394,38 @@ class StreamedOffloadCheckpointWrapper(torch.nn.Module):
                     device = v.device.index
                     break
         registry = get_registry(device)
+        self._cached_registry = registry
         registry.new_call(self._block_idx)
         hook = AsyncCpuSaveHook(registry, self._block_idx)
         with hook:
             return self._streamed_offload_inner(*args, **kwargs)
+
+    # ------------------------------------------------------------------
+    # Phase 3 backward hooks
+    # ------------------------------------------------------------------
+
+    def _streamed_pre_backward(self, _module, _grad_output) -> None:
+        registry = self._cached_registry
+        if registry is None:
+            return
+        # First block in backward (= last in forward) has no preceding
+        # prefetch from a neighbour. Restore self inline so unpack finds
+        # the live buffer ready when recompute fires.
+        if self._block_idx not in registry.live_buffers:
+            registry.prefetch(self._block_idx, acquire_sem=False)
+        # Transition this block from "prefetched neighbour" (semaphore
+        # held) to "currently active": release the semaphore so the
+        # next-neighbour prefetch below can acquire.
+        registry.mark_active(self._block_idx)
+        # Kick off prefetch for the next block in backward order. The
+        # semaphore now bounds the queue depth to one in-flight neighbour.
+        nxt = registry.next_bwd_block(self._block_idx)
+        if nxt is not None:
+            registry.prefetch(nxt, acquire_sem=True)
+
+    def _streamed_post_backward(self, _module, _grad_input,
+                                _grad_output) -> None:
+        registry = self._cached_registry
+        if registry is None:
+            return
+        registry.release_after_bwd(self._block_idx)
