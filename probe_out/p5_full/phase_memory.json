@@ -1,0 +1,276 @@
+{
+  "0": {
+    "P0_idle": {
+      "allocated_gb": 5.039214592,
+      "max_allocated_gb": 5.039214592,
+      "reserved_gb": 5.372903424,
+      "categories_gb": {
+        "weights_bf16": 5.001465024,
+        "grads_bf16": 0.0,
+        "master_fp32": 0.0,
+        "adam_m": 0.0,
+        "adam_v": 0.0,
+        "vae": 0.0,
+        "t5": 0.0,
+        "other_named": 0.0
+      }
+    },
+    "P1_inputs_done": {
+      "allocated_gb": 5.039214592,
+      "max_allocated_gb": 5.039214592,
+      "reserved_gb": 5.372903424,
+      "categories_gb": {
+        "weights_bf16": 5.001465024,
+        "grads_bf16": 0.0,
+        "master_fp32": 0.0,
+        "adam_m": 0.0,
+        "adam_v": 0.0,
+        "vae": 0.0,
+        "t5": 0.0,
+        "other_named": 0.0
+      }
+    },
+    "P2_fwd_start": {
+      "allocated_gb": 5.039214592,
+      "max_allocated_gb": 5.039214592,
+      "reserved_gb": 5.372903424,
+      "categories_gb": {
+        "weights_bf16": 5.001465024,
+        "grads_bf16": 0.0,
+        "master_fp32": 0.0,
+        "adam_m": 0.0,
+        "adam_v": 0.0,
+        "vae": 0.0,
+        "t5": 0.0,
+        "other_named": 0.0
+      }
+    },
+    "P3_fwd_half": {
+      "allocated_gb": 6.336402432,
+      "max_allocated_gb": 7.75429632,
+      "reserved_gb": 8.994684928,
+      "categories_gb": {
+        "weights_bf16": 5.091533184,
+        "grads_bf16": 0.0,
+        "master_fp32": 0.0,
+        "adam_m": 0.0,
+        "adam_v": 0.0,
+        "vae": 0.0,
+        "t5": 0.0,
+        "other_named": 0.0
+      }
+    },
+    "P4_fwd_end": {
+      "allocated_gb": 6.750051328,
+      "max_allocated_gb": 8.34162176,
+      "reserved_gb": 9.498001408,
+      "categories_gb": {
+        "weights_bf16": 5.001465024,
+        "grads_bf16": 0.0,
+        "master_fp32": 0.0,
+        "adam_m": 0.0,
+        "adam_v": 0.0,
+        "vae": 0.0,
+        "t5": 0.0,
+        "other_named": 0.0
+      }
+    },
+    "P5_bwd_peak": {
+      "allocated_gb": 10.097355264,
+      "max_allocated_gb": 13.370302464,
+      "reserved_gb": 16.240345088,
+      "categories_gb": {
+        "weights_bf16": 5.001465024,
+        "grads_bf16": 5.001465024,
+        "master_fp32": 0.0,
+        "adam_m": 0.0,
+        "adam_v": 0.0,
+        "vae": 0.0,
+        "t5": 0.0,
+        "other_named": 0.0
+      }
+    },
+    "P6_post_bwd": {
+      "allocated_gb": 10.097355264,
+      "max_allocated_gb": 10.097355264,
+      "reserved_gb": 16.240345088,
+      "categories_gb": {
+        "weights_bf16": 5.001465024,
+        "grads_bf16": 5.001465024,
+        "master_fp32": 0.0,
+        "adam_m": 0.0,
+        "adam_v": 0.0,
+        "vae": 0.0,
+        "t5": 0.0,
+        "other_named": 0.0
+      }
+    },
+    "P7_opt_done": {
+      "allocated_gb": 20.10972416,
+      "max_allocated_gb": 25.111189504,
+      "reserved_gb": 26.839351296,
+      "categories_gb": {
+        "weights_bf16": 5.001465024,
+        "grads_bf16": 5.001465024,
+        "master_fp32": 0.0,
+        "adam_m": 5.001465024,
+        "adam_v": 5.001465024,
+        "vae": 0.0,
+        "t5": 0.0,
+        "other_named": 0.0
+      }
+    },
+    "P0_next": {
+      "allocated_gb": 15.108186624,
+      "max_allocated_gb": 20.10972416,
+      "reserved_gb": 26.839351296,
+      "categories_gb": {
+        "weights_bf16": 5.001465024,
+        "grads_bf16": 0.0,
+        "master_fp32": 0.0,
+        "adam_m": 5.001465024,
+        "adam_v": 5.001465024,
+        "vae": 0.0,
+        "t5": 0.0,
+        "other_named": 0.0
+      }
+    }
+  },
+  "1": {
+    "P0_idle": {
+      "allocated_gb": 15.108186624,
+      "max_allocated_gb": 15.108186624,
+      "reserved_gb": 26.839351296,
+      "categories_gb": {
+        "weights_bf16": 5.001465024,
+        "grads_bf16": 0.0,
+        "master_fp32": 0.0,
+        "adam_m": 5.001465024,
+        "adam_v": 5.001465024,
+        "vae": 0.0,
+        "t5": 0.0,
+        "other_named": 0.0
+      }
+    },
+    "P1_inputs_done": {
+      "allocated_gb": 15.1081856,
+      "max_allocated_gb": 15.108186624,
+      "reserved_gb": 26.839351296,
+      "categories_gb": {
+        "weights_bf16": 5.001465024,
+        "grads_bf16": 0.0,
+        "master_fp32": 0.0,
+        "adam_m": 5.001465024,
+        "adam_v": 5.001465024,
+        "vae": 0.0,
+        "t5": 0.0,
+        "other_named": 0.0
+      }
+    },
+    "P2_fwd_start": {
+      "allocated_gb": 15.1081856,
+      "max_allocated_gb": 15.1081856,
+      "reserved_gb": 26.839351296,
+      "categories_gb": {
+        "weights_bf16": 5.001465024,
+        "grads_bf16": 0.0,
+        "master_fp32": 0.0,
+        "adam_m": 5.001465024,
+        "adam_v": 5.001465024,
+        "vae": 0.0,
+        "t5": 0.0,
+        "other_named": 0.0
+      }
+    },
+    "P3_fwd_half": {
+      "allocated_gb": 16.40371456,
+      "max_allocated_gb": 17.821485568,
+      "reserved_gb": 29.121052672,
+      "categories_gb": {
+        "weights_bf16": 5.091533184,
+        "grads_bf16": 0.0,
+        "master_fp32": 0.0,
+        "adam_m": 5.001465024,
+        "adam_v": 5.001465024,
+        "vae": 0.0,
+        "t5": 0.0,
+        "other_named": 0.0
+      }
+    },
+    "P4_fwd_end": {
+      "allocated_gb": 16.81591296,
+      "max_allocated_gb": 18.408114688,
+      "reserved_gb": 29.121052672,
+      "categories_gb": {
+        "weights_bf16": 5.001465024,
+        "grads_bf16": 0.0,
+        "master_fp32": 0.0,
+        "adam_m": 5.001465024,
+        "adam_v": 5.001465024,
+        "vae": 0.0,
+        "t5": 0.0,
+        "other_named": 0.0
+      }
+    },
+    "P5_bwd_peak": {
+      "allocated_gb": 20.130694656,
+      "max_allocated_gb": 23.402949632,
+      "reserved_gb": 29.974593536,
+      "categories_gb": {
+        "weights_bf16": 5.001465024,
+        "grads_bf16": 5.001465024,
+        "master_fp32": 0.0,
+        "adam_m": 5.001465024,
+        "adam_v": 5.001465024,
+        "vae": 0.0,
+        "t5": 0.0,
+        "other_named": 0.0
+      }
+    },
+    "P6_post_bwd": {
+      "allocated_gb": 20.130694656,
+      "max_allocated_gb": 20.130694656,
+      "reserved_gb": 29.974593536,
+      "categories_gb": {
+        "weights_bf16": 5.001465024,
+        "grads_bf16": 5.001465024,
+        "master_fp32": 0.0,
+        "adam_m": 5.001465024,
+        "adam_v": 5.001465024,
+        "vae": 0.0,
+        "t5": 0.0,
+        "other_named": 0.0
+      }
+    },
+    "P7_opt_done": {
+      "allocated_gb": 20.10974464,
+      "max_allocated_gb": 25.111209984,
+      "reserved_gb": 29.974593536,
+      "categories_gb": {
+        "weights_bf16": 5.001465024,
+        "grads_bf16": 5.001465024,
+        "master_fp32": 0.0,
+        "adam_m": 5.001465024,
+        "adam_v": 5.001465024,
+        "vae": 0.0,
+        "t5": 0.0,
+        "other_named": 0.0
+      }
+    },
+    "P0_next": {
+      "allocated_gb": 15.108207104,
+      "max_allocated_gb": 20.10974464,
+      "reserved_gb": 29.974593536,
+      "categories_gb": {
+        "weights_bf16": 5.001465024,
+        "grads_bf16": 0.0,
+        "master_fp32": 0.0,
+        "adam_m": 5.001465024,
+        "adam_v": 5.001465024,
+        "vae": 0.0,
+        "t5": 0.0,
+        "other_named": 0.0
+      }
+    }
+  }
+}

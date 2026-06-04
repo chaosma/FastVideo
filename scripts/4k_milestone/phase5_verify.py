@@ -47,28 +47,38 @@ from typing import Any
 
 MODES = ("full", "full_offload", "streamed_offload")
 
-LOSS_RE = re.compile(
-    r"\[step\s+(\d+)\]\s+loss=([\-0-9.eE+nanif]+)\s+step_time_sec=([\-0-9.eE+nanif]+)")
+STEP_RE = re.compile(r"\[step\s+(\d+)\]")
+# trainer.py:212 emits `loss=` only when the method's metrics dict has a
+# "loss" key; the 4K fine-tune method emits `total_loss=` instead (the
+# observed line is `[step N] step_time_sec=... total_loss=... ...`).
+# Accept either, in any order relative to step_time_sec. Note `\bloss=`
+# cannot match `total_loss=`/`finetune_loss=` ("_" is a word character,
+# so there is no boundary before "loss").
+LOSS_VAL_RE = re.compile(r"\b(?:loss|total_loss)=([\-0-9.eE+nanif]+)")
+STEP_TIME_RE = re.compile(r"\bstep_time_sec=([\-0-9.eE+nanif]+)")
 
 
 def _parse_loss_log(path: Path) -> list[dict[str, float]]:
     """Return per-step {step, loss, step_time_sec} parsed from train.log.
 
-    Only matches the trainer's `[step N] loss=... step_time_sec=...`
-    console echo (trainer.py:212), which is rank-0 only and always
-    produced regardless of W&B mode.
+    Matches the trainer's `[step N] ...` console echo (trainer.py:212),
+    which is rank-0 only and always produced regardless of W&B mode.
     """
     if not path.exists():
         return []
     rows: list[dict[str, float]] = []
     with open(path, "r", errors="replace") as f:
         for line in f:
-            m = LOSS_RE.search(line)
-            if m:
+            m = STEP_RE.search(line)
+            if not m:
+                continue
+            loss_m = LOSS_VAL_RE.search(line)
+            time_m = STEP_TIME_RE.search(line)
+            if loss_m and time_m:
                 rows.append({
                     "step": int(m.group(1)),
-                    "loss": float(m.group(2)),
-                    "step_time_sec": float(m.group(3)),
+                    "loss": float(loss_m.group(1)),
+                    "step_time_sec": float(time_m.group(1)),
                 })
     return rows
 

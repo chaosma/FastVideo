@@ -122,6 +122,9 @@ class BlockRegistry:
         # Tracks which prefetches have acquired the semaphore so post-bwd
         # can release exactly once per acquire.
         self._prefetch_acquired: set[int] = set()
+        # True while an end-of-backward sweep callback is registered with
+        # the autograd engine for the in-flight backward pass.
+        self._finalizer_armed = False
 
     def new_call(self, block_idx: int) -> None:
         """Reset per-call pack state for ``block_idx``.
@@ -150,16 +153,22 @@ class BlockRegistry:
     def next_bwd_block(self, block_idx: int) -> int | None:
         """Block that will run backward immediately after ``block_idx``.
 
-        Backward iterates ``fwd_order`` in reverse. Returns ``None`` once
-        ``block_idx`` is the last (= first-in-forward) block.
+        Derived from the insertion order of ``records``: ``new_call``
+        re-inserts every block at forward entry and cleanup pops it after
+        its backward, so the keys are exactly the blocks of the *current*
+        step in forward order. ``fwd_order`` is unsuitable here — it is
+        first-seen-ever and accumulates block indices across wrapper sets
+        (e.g. several models built in one process), which would make the
+        scheduler prefetch blocks whose model is long gone.
         """
+        pending = list(self.records.keys())
         try:
-            pos = self.fwd_order.index(block_idx)
+            pos = pending.index(block_idx)
         except ValueError:
             return None
         if pos == 0:
             return None
-        return self.fwd_order[pos - 1]
+        return pending[pos - 1]
 
     def prefetch(self, block_idx: int, *, acquire_sem: bool) -> None:
         """Stage D2H for every packed record of ``block_idx`` onto GPU.
@@ -222,7 +231,21 @@ class BlockRegistry:
         Compute-stream lifetimes are managed via ``record_stream`` in the
         unpack hook, so dropping the Python references here is safe even
         if the kernels are still running.
+
+        Caveat: for a module none of whose *inputs* require grad (the
+        first block of a model fed a leaf without requires_grad), the
+        ``full_backward_hook`` fires degenerately early — at output-grad
+        time, BEFORE the block's own backward (and unpack) has run.
+        Releasing then would destroy state the imminent unpack still
+        needs. Detect that case via unconsumed live slots and leave the
+        cleanup to ``finalize_backward`` instead.
         """
+        live = self.live_buffers.get(block_idx)
+        if live is not None and any(b is not None for b in live):
+            # Prefetched buffers not yet consumed by unpack: this is the
+            # early-firing-hook case described above. Do nothing; the
+            # end-of-backward finalizer sweeps this block's state.
+            return
         self.live_buffers.pop(block_idx, None)
         self.restore_events.pop(block_idx, None)
         # Defensive: if for some reason mark_active was never called,
@@ -233,6 +256,34 @@ class BlockRegistry:
         # Clear the now-consumed CPU records to release pinned-host pages;
         # future steps will re-pack and re-allocate.
         self.records.pop(block_idx, None)
+
+    # ------------------------------------------------------------------
+    # End-of-backward finalizer
+    # ------------------------------------------------------------------
+
+    def arm_finalizer(self) -> None:
+        """Register a once-per-backward callback that sweeps all remaining
+        registry state when the backward pass completes.
+
+        This is the backstop for hook-ordering quirks (see
+        ``release_after_bwd``): whatever the per-block hooks failed to
+        clean is guaranteed gone before ``loss.backward()`` returns, so
+        no stale entries can leak into the next step.
+        """
+        if self._finalizer_armed:
+            return
+        self._finalizer_armed = True
+        torch.autograd.Variable._execution_engine.queue_callback(
+            self.finalize_backward)
+
+    def finalize_backward(self) -> None:
+        self._finalizer_armed = False
+        self.live_buffers.clear()
+        self.restore_events.clear()
+        self.records.clear()
+        for _ in range(len(self._prefetch_acquired)):
+            self.prefetch_sem.release()
+        self._prefetch_acquired.clear()
 
 
 def get_registry(device: torch.device | int | None = None) -> BlockRegistry:
@@ -408,6 +459,9 @@ class StreamedOffloadCheckpointWrapper(torch.nn.Module):
         registry = self._cached_registry
         if registry is None:
             return
+        # Guarantee a state sweep when this backward pass ends, whatever
+        # the per-block hook ordering turns out to be.
+        registry.arm_finalizer()
         # First block in backward (= last in forward) has no preceding
         # prefetch from a neighbour. Restore self inline so unpack finds
         # the live buffer ready when recompute fires.

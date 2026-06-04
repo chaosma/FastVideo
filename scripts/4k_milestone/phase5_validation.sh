@@ -37,6 +37,16 @@ MODEL_INIT="${MODEL_INIT:-Wan-AI/Wan2.2-TI2V-5B-Diffusers}"
 CONFIG="${CONFIG:-examples/train/configs/fine_tuning/wan/t2v_4k.yaml}"
 SKIP_PYTEST="${SKIP_PYTEST:-0}"
 SKIP_PROBES="${SKIP_PROBES:-0}"
+# Loss tolerance for streamed-vs-full_offload at step 2. The plan's literal
+# 1e-5 is unachievable on this stack: flash-attn backward is
+# nondeterministic, and the measured same-mode rerun spread at step 2 is
+# ~8e-4 (see §11 of memory_prefetch_plan.md). Default stays strict; pass
+# LOSS_TOL=5e-3 to grade against measured rerun noise instead.
+LOSS_TOL="${LOSS_TOL:-1e-5}"
+# Extra CLI overrides appended verbatim to every probe run (e.g. Phase 6's
+# --training.checkpoint.training_state_checkpointing_steps 0 to skip the
+# ~86 GB 14B end-of-run checkpoint save).
+EXTRA_ARGS="${EXTRA_ARGS:-}"
 
 mkdir -p "${OUT_ROOT}"
 
@@ -111,7 +121,8 @@ exec bash examples/train/run.sh \\
   --training.data.num_latent_t ${NUM_LATENT_T} \\
   --training.model.enable_gradient_checkpointing_type ${mode} \\
   --training.loop.max_train_steps ${STEPS} \\
-  --training.checkpoint.resume_from_checkpoint ""
+  --training.checkpoint.resume_from_checkpoint "" \\
+  ${EXTRA_ARGS}
 EOF
   chmod +x "${script}"
 
@@ -150,6 +161,7 @@ echo "[3/3] Running verifier ..."
   set +e
   python scripts/4k_milestone/phase5_verify.py \
     --probe-root "${OUT_ROOT}" \
+    --loss-tol "${LOSS_TOL}" \
     --report-md "${OUT_ROOT}/phase5_report.md" \
     --report-json "${OUT_ROOT}/phase5_report.json"
   VERIFIER_EXIT=$?

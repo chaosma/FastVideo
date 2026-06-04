@@ -172,11 +172,16 @@ def test_wrapper_forward_backward_matches_unwrapped():
     loss_wrap.backward()
     torch.cuda.synchronize()
 
+    # Backward consumes the unpacked (CPU-roundtripped) buffer, which lives
+    # at a different address/alignment than the original activation; cuBLAS
+    # may legally pick a different reduction kernel for it, so gradients can
+    # differ by a few fp32 ULPs (~1e-7 observed). Forward stays bit-exact
+    # (asserted above) because it runs on the original tensors.
     for (n, p_p), (_, p_w) in zip(plain.named_parameters(),
                                   streamed.named_parameters()):
         assert p_p.grad is not None and p_w.grad is not None, n
-        assert torch.allclose(p_p.grad, p_w.grad, atol=0, rtol=0), \
+        assert torch.allclose(p_p.grad, p_w.grad, atol=1e-6, rtol=1e-5), \
             f"grad mismatch on {n}"
 
     assert x.grad is not None and x2.grad is not None
-    assert torch.allclose(x.grad, x2.grad, atol=0, rtol=0)
+    assert torch.allclose(x.grad, x2.grad, atol=1e-6, rtol=1e-5)

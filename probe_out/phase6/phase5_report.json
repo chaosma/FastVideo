@@ -1,0 +1,62 @@
+{
+  "pass": true,
+  "checks": [
+    {
+      "name": "streaming_pytest_passes",
+      "pass": true,
+      "detail": "pytest exit code = 0 (expected 0; pytest.log at /workspace/FastVideo/probe_out/phase6/pytest.log)"
+    },
+    {
+      "name": "probe_full_completed",
+      "pass": true,
+      "detail": "exit=0, phase_memory entries=2, last loss=0.5842348337173462"
+    },
+    {
+      "name": "probe_full_offload_completed",
+      "pass": true,
+      "detail": "exit=0, phase_memory entries=2, last loss=0.5836726427078247"
+    },
+    {
+      "name": "probe_streamed_offload_completed",
+      "pass": true,
+      "detail": "exit=0, phase_memory entries=2, last loss=0.5855268239974976"
+    },
+    {
+      "name": "streamed_peak_at_or_below_full_offload_peak",
+      "pass": true,
+      "detail": "FULL_OFFLOAD P5_bwd_peak.max_alloc = 70.29 GB; STREAMED_OFFLOAD = 71.13 GB; slack = 1.00 GB"
+    },
+    {
+      "name": "step_peak_streamed_vs_full_recompute_info",
+      "pass": true,
+      "detail": "FULL P7_opt_done = 35.98 GB, STREAMED_OFFLOAD = 35.98 GB",
+      "informational": true
+    },
+    {
+      "name": "streamed_vs_full_offload_loss_match",
+      "pass": true,
+      "detail": "step 2: full_offload=0.5836726, streamed=0.5855268, diff=1.85e-03 (tol=5e-03)"
+    },
+    {
+      "name": "streamed_step_time_within_budget",
+      "pass": true,
+      "detail": "FULL_OFFLOAD step 2 = 630.45s; STREAMED_OFFLOAD step 2 = 628.22s; ratio = 1.00 (limit 1.20)"
+    },
+    {
+      "name": "streamed_filo_backward_order",
+      "pass": true,
+      "detail": "observed 40 bwd_pre events: first 3 = [39, 38, 37], last 3 = [2, 1, 0]"
+    }
+  ],
+  "metrics": {
+    "full_offload_P5_bwd_peak_max_alloc_gb": 70.294352896,
+    "streamed_offload_P5_bwd_peak_max_alloc_gb": 71.129097216,
+    "full_P7_opt_done_max_alloc_gb": 35.982256128,
+    "streamed_offload_P7_opt_done_max_alloc_gb": 35.982256128,
+    "thresholds": {
+      "peak_slack_gb": 1.0,
+      "loss_tol": 0.005,
+      "step_time_ratio": 1.2
+    }
+  }
+}

@@ -411,7 +411,7 @@ final validation.**
 - `examples/train/run.sh` — `PYTORCH_CUDA_ALLOC_CONF`.
 - New tests under `fastvideo/tests/training/streaming/`.
 
-## 10. Status — Phases 0, 1 validated on 5B / 4×H200; Phases 2, 3, 4 implemented and packaged for Phase 5 GPU testing
+## 10. Status — Phases 0–6 complete; Phase 6 peak target missed by 11 GB, follow-ups identified (§12)
 
 Phases 0 and 1 are landed and validated on a 4× H200 SXM box with the
 Wan 2.2 TI2V 5B model at 24fps × 121 frames × 704×1280, `sp_size=4`,
@@ -764,3 +764,142 @@ follow-up work the failure triage points to. The two reports
 (`phase5_report.md`, `phase5_report.json`) plus the three
 `{phase_memory.json, layer_trace.csv, train.log}` triplets are the
 canonical artifacts to attach.
+
+## 11. Phase 5 results — PASS (5B / 4×H200 of 8 / 24fps × 121f / 704×1280, 2026-06-03)
+
+`phase5_validation.sh` verdict: **PASS, 9/9 checks** (run with
+`LOSS_TOL=5e-3`, see "Loss criterion" below). Canonical artifacts:
+`probe_out/phase5_v2/{phase5_report.md,phase5_report.json,pytest.log}`
+plus the three `{phase_memory.json, layer_trace.csv, train.log}`
+triplets. (`probe_out/phase5/` holds the first, pre-fix FAIL run.)
+
+| Metric (rank 0, step 1) | FULL | FULL_OFFLOAD | STREAMED_OFFLOAD |
+|---|---:|---:|---:|
+| P5_bwd_peak max_alloc | 23.40 GB | 23.33 GB | 23.38 GB |
+| P7_opt_done max_alloc | 25.10 GB | 25.10 GB | 25.10 GB |
+| Step time (step 2) | 2.25 s | 2.32 s | 2.26 s (ratio 0.97) |
+| bwd FILO 29→0 | ✓ | ✓ | ✓ |
+
+At this resolution the stash is only ~1.26 GB total, so the three modes
+are within noise of each other on peak — Phase 5 validates correctness
+and overhead, not the headline GB win (that is Phase 6's job, where the
+14B stash is ~68 GB/card).
+
+### Bugs found by the first harness run and fixed
+
+The initial run FAILed: 4/18 pytest failures. Fixes landed in
+`activation_streaming.py` + tests:
+
+1. **Cross-model registry contamination.** `next_bwd_block` used
+   `fwd_order`, which is first-seen-ever and accumulates block indices
+   across every wrapper set built in the process (each pytest case
+   builds a fresh model; the global `_block_idx_counter` keeps rising).
+   The scheduler then prefetched blocks of dead models, leaking
+   `{idx: []}` entries and inflating observed queue depth to 3. Now
+   derives backward order from the current step's `records` insertion
+   order (re-inserted by `new_call` every forward, popped after bwd).
+2. **Early-firing `full_backward_hook`.** For a module none of whose
+   inputs require grad (first block fed a non-requires-grad leaf —
+   `two_step_repeat`'s exact setup), PyTorch fires the full backward
+   hook at *output*-grad time, before the block's own backward/unpack
+   runs (PyTorch even warns about this). `release_after_bwd` then
+   destroyed records the imminent unpack needed → `KeyError` on step 2.
+   Now skips cleanup while live slots are unconsumed.
+3. **End-of-backward finalizer.** `arm_finalizer()` registers a
+   once-per-backward `queue_callback` that sweeps all remaining registry
+   state before `loss.backward()` returns — the backstop that makes
+   "registry is clean after every step" an invariant rather than an
+   outcome of fortunate hook ordering.
+4. **Bit-exact grad assert relaxed** (`atol=0` → `atol=1e-6/rtol=1e-5`)
+   in `test_wrapper_forward_backward_matches_unwrapped`: the unpacked
+   buffer lives at a different address/alignment than the original
+   activation, so cuBLAS may pick a different reduction kernel;
+   measured deviation 1–2 fp32 ULPs (~1e-7). Forward remains bit-exact
+   and is still asserted at `atol=0`.
+
+None of bugs 1–3 affected the integration probes (one model per
+process; DiT block inputs require grad), which is why the probe runs
+passed even before the fixes.
+
+### Loss criterion restated
+
+The plan's "loss identical within 1e-5" is unachievable on this stack:
+flash-attn backward is nondeterministic, and FULL_OFFLOAD differs from
+*itself* at step 2 by ~8e-4 across same-seed reruns (measured twice on
+this box; FULL moved 1.2e-3 between harness runs). Mode-vs-mode diffs
+(8.2e-4, 3.0e-3 across runs) sit inside that same-mode noise band, and
+hook-level transparency is pinned separately by the unit suite
+(bit-exact pack/unpack roundtrip; ULP-level wrapper backward). Phase 5
+therefore grades loss at `LOSS_TOL=5e-3` ≈ 3–5× measured rerun noise.
+A bitwise check would require deterministic algorithms + a
+deterministic attention backend, at which point the step-time numbers
+stop being representative.
+
+### Phase 6 readiness
+
+- 14B model (`Wan-AI/Wan2.1-T2V-14B-Diffusers`) fully downloaded and
+  sha-verified in the HF cache. NOTE: `hf download` stalls indefinitely
+  on this box (~1–2 MB/s, 0-byte periods, shrinking `.incomplete`
+  files) while raw curl sustains ~70 MB/s/stream — use
+  `scripts/curl_hf_fetch.sh <org/repo>`, and see
+  `.agents/lessons/2026-06-03_hf-download-stalls-use-curl.md`.
+- Synthetic 5B dataset regenerated (`data/synthetic_5b_121f`, seed 42,
+  deterministic). A 14B-shaped dataset (z_dim=16 Wan2.1 VAE) is still
+  needed for Phase 6 — `make_synthetic_4k_data.py`.
+- Box is 8× H200; Phase 5 ran on GPUs 0–3, so Phase 6's 8-GPU runs fit.
+
+## 12. Phase 6 results — 14B / 8×H200 / rung 0 (2160×3840 × 77f, sp=8), 2026-06-04
+
+Harness: `scripts/4k_milestone/phase6_14b_study.sh` (Phase 5 harness at the
+14B measurement point + 10-step streamed soak). Verifier: PASS 9/9.
+Artifacts: `probe_out/phase6/{full,full_offload,streamed_offload,streamed_soak10}/`
++ `phase5_report.{md,json}`. Dataset: `data/synthetic_4k_14b_rung0`
+(8 samples, seed 42). Checkpoint saves disabled (86 GB each vs 84 GB free disk).
+
+### Before / after (rank 0, step 2 steady state, GB)
+
+| Metric | FULL (before) | FULL_OFFLOAD | STREAMED_OFFLOAD (after) | Δ vs FULL |
+|---|---:|---:|---:|---:|
+| P4_fwd_end max_alloc  | 80.06 | 47.71 | 47.71 | **−32.4** |
+| P5_bwd_peak max_alloc | 95.31 | 70.29 | **71.13** | **−24.2 (−25 %)** |
+| P5 reserved           | 107.4 | 76.2  | 77.9  | −29.5 |
+| P7_opt_done max_alloc | 35.98 | 35.98 | 35.98 | — |
+| Step time (step 2)    | 627.9 s | 630.4 s | 628.2 s | **+0.05 %** |
+| Loss step 2           | 0.58423 | 0.58367 | 0.58553 | within rerun noise |
+
+10-step streamed soak: step time flat at 626.6–634.9 s (no ramp), peak
+flat at 71.13 GB every steady step (no fragmentation creep), losses
+finite throughout. Backward FILO 39→0 confirmed (40 blocks).
+
+### Verdict vs §3 Phase 6 acceptance
+
+- Step time ≤ 1.05× FULL: **PASS** (1.0005× — streaming is free).
+- Loss match: **PASS** (within measured nondeterminism noise, §11 criterion).
+- Peak ≤ 60 GB: **MISS** — 71.13 GB. The −24 GB win is real but the §1
+  budget was optimistic in two places:
+  1. **~11 GB of saved tensors live outside the wrapped blocks**
+     (P4 allocated in offload modes = 32.9 GB vs 21.7 GB static):
+     patch/condition embedder outputs, non-block saves the per-block
+     hook never sees. §1 assumed the whole 68 GB stash streams; only
+     the 40 block inputs (~33 GB at rung 0) do.
+  2. **Backward transient is ~38 GB**, not §1's ~20 GB: this venv runs
+     Torch SDPA (flash_attn not installed) whose backward materialises
+     larger intermediates at 81k tokens/rank, on top of recompute
+     working set + fp32 grad-shard accumulation.
+- Note FULL baseline measured 95.3 GB alloc / 107.4 reserved — below the
+  plan's ≈133 GB estimate (which dated from a different accounting);
+  both sides of the comparison are lower than budgeted.
+
+### Follow-ups to close 71 → <60 GB
+
+1. Install flash-attn (or force the flash SDPA kernel) — shrinks the
+   dominant backward transient. Likely the single biggest lever.
+2. Extend streaming to the ~11 GB of non-block saves (wrap the embedder
+   / pre-block stages, or a model-level saved-tensors hook).
+3. §7 stretch items (CPU-offload Adam state ≈ −14 GB) if still short.
+
+Streamed vs naive offload at this scale: +0.84 GB peak (exactly the
+one-deep in-flight prefetch buffer, as designed) and −0.4 % step time.
+At rung-0 step times (~628 s) the naive offload's synchronous copies are
+already negligible, so streaming's overlap advantage will show on
+shorter-step / higher-bandwidth-pressure configs, not here.
