@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import csv
 import html
+import json
 from pathlib import Path
 
 W, H = 1500, 700
@@ -30,7 +31,9 @@ PLOT_H = H - MARGIN_T - MARGIN_B
 H200_CAP_GB = 141.0
 
 C = {
-    "allocated": "#2563eb",   # blue fill (resident)
+    "allocated": "#1d4ed8",   # blue line (resident outline)
+    "persistent":"#475569",   # slate fill (params + optimizer floor)
+    "stash":     "#fb923c",   # orange fill (activation stash = alloc - floor)
     "maxalloc":  "#dc2626",   # red line (peak envelope)
     "fwd_bg":    "#eff6ff",   # pale blue forward region
     "bwd_bg":    "#fef2f2",   # pale red backward region
@@ -38,6 +41,22 @@ C = {
     "cap":       "#dc2626",
     "axis":      "#374151",
 }
+
+
+def _floor_gb(phase_memory: Path | None) -> float:
+    """Constant params+optimizer GB, read from phase_memory.json categories.
+
+    This is the resident floor below the activation stash (it does not vary
+    across the step). Returns 0.0 when no phase_memory is supplied, in which
+    case the allocated area is drawn as a single band (legacy behaviour)."""
+    if phase_memory is None or not phase_memory.exists():
+        return 0.0
+    data = json.loads(phase_memory.read_text())
+    snap = data[next(iter(data))]
+    rec = snap.get("P2_fwd_start") or snap[next(iter(snap))]
+    c = rec.get("categories_gb") or {}
+    return (float(c.get("adam_m", 0)) + float(c.get("adam_v", 0)) +
+            float(c.get("master_fp32", 0)) + float(c.get("weights_bf16", 0)))
 
 
 def _text(x, y, s, *, size=12, anchor="start", weight="400", fill="#111827"):
@@ -56,7 +75,8 @@ def _load(path: Path, step: str | None):
     return rows, step
 
 
-def render(path: Path, *, title: str, subtitle: str, step: str | None) -> str:
+def render(path: Path, *, title: str, subtitle: str, step: str | None,
+           floor: float = 0.0) -> str:
     rows, step = _load(path, step)
     n = len(rows)
     if n == 0:
@@ -108,11 +128,23 @@ def render(path: Path, *, title: str, subtitle: str, step: str | None) -> str:
     p.append(_text(MARGIN_L - 50, MARGIN_T - 12, "GB per card", size=12,
                    weight="600", fill="#374151"))
 
-    # allocated filled area.
-    pts = [f"{x_of(i):.1f},{y_of(alloc[i]):.1f}" for i in range(n)]
-    pts += [f"{x_of(n - 1):.1f},{y_of(0):.1f}", f"{x_of(0):.1f},{y_of(0):.1f}"]
-    p.append(f'<polygon points="{" ".join(pts)}" fill="{C["allocated"]}" '
-             f'opacity="0.35"/>')
+    # allocated filled area, split at the persistent floor so the activation
+    # stash (everything saved-for-backward above params+optimizer) reads as
+    # its own band. The stash top traces allocated(t) exactly per block, so
+    # its true shape shows: a triangle for the baseline (ramps up over the 40
+    # forward blocks, drains over the 40 backward blocks) vs a flat sliver for
+    # offload (each block's stash is shipped to CPU as it is produced).
+    fl = min(floor, min(alloc)) if floor > 0 else 0.0
+    if fl > 0:
+        p.append(f'<polygon points="{MARGIN_L:.1f},{y_of(0):.1f} '
+                 f'{MARGIN_L + PLOT_W:.1f},{y_of(0):.1f} '
+                 f'{MARGIN_L + PLOT_W:.1f},{y_of(fl):.1f} '
+                 f'{MARGIN_L:.1f},{y_of(fl):.1f}" '
+                 f'fill="{C["persistent"]}" opacity="0.95"/>')
+    stash_top = [f"{x_of(i):.1f},{y_of(alloc[i]):.1f}" for i in range(n)]
+    p.append(f'<polygon points="{" ".join(stash_top)} '
+             f'{x_of(n - 1):.1f},{y_of(fl):.1f} {x_of(0):.1f},{y_of(fl):.1f}" '
+             f'fill="{C["stash"]}" opacity="0.95"/>')
     # allocated line.
     line = " ".join(f"{x_of(i):.1f},{y_of(alloc[i]):.1f}" for i in range(n))
     p.append(f'<polyline points="{line}" fill="none" '
@@ -167,15 +199,28 @@ def render(path: Path, *, title: str, subtitle: str, step: str | None) -> str:
 
     # Legend.
     lx, ly = MARGIN_L + 12, MARGIN_T + 40
+    if fl > 0:
+        p.append(f'<rect x="{lx}" y="{ly - 9}" width="24" height="11" '
+                 f'fill="{C["stash"]}" opacity="0.95"/>')
+        p.append(_text(lx + 30, ly + 1, "activation stash (live)", size=11,
+                       fill="#374151"))
+        p.append(f'<rect x="{lx}" y="{ly + 9}" width="24" height="11" '
+                 f'fill="{C["persistent"]}" opacity="0.95"/>')
+        p.append(_text(lx + 30, ly + 19,
+                       f"params + optimizer ({fl:.1f} GB)", size=11,
+                       fill="#374151"))
+        ly += 36
+    else:
+        p.append(f'<line x1="{lx}" y1="{ly}" x2="{lx + 24}" y2="{ly}" '
+                 f'stroke="{C["allocated"]}" stroke-width="2"/>')
+        p.append(_text(lx + 30, ly + 4, "allocated (resident)", size=11,
+                       fill="#374151"))
+        ly += 18
     p.append(f'<line x1="{lx}" y1="{ly}" x2="{lx + 24}" y2="{ly}" '
-             f'stroke="{C["allocated"]}" stroke-width="2"/>')
-    p.append(_text(lx + 30, ly + 4, "allocated (resident)", size=11,
-                   fill="#374151"))
-    p.append(f'<line x1="{lx}" y1="{ly + 18}" x2="{lx + 24}" y2="{ly + 18}" '
              f'stroke="{C["maxalloc"]}" stroke-width="2" '
              f'stroke-dasharray="4 2"/>')
-    p.append(_text(lx + 30, ly + 22, "max_allocated (in-window peak)",
-                   size=11, fill="#374151"))
+    p.append(_text(lx + 30, ly + 4, "max_allocated (high-water; per-block "
+                   "bwd transient not resolved)", size=11, fill="#374151"))
 
     p.append('</svg>')
     return "\n".join(p)
@@ -184,6 +229,9 @@ def render(path: Path, *, title: str, subtitle: str, step: str | None) -> str:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--layer-trace", required=True, type=Path)
+    ap.add_argument("--phase-memory", type=Path, default=None,
+                    help="phase_memory.json; supplies the params+optimizer "
+                    "floor so the stash is drawn as its own band")
     ap.add_argument("--title", required=True)
     ap.add_argument("--subtitle", default="")
     ap.add_argument("--step", default=None,
@@ -191,7 +239,7 @@ def main():
     ap.add_argument("--out", required=True, type=Path)
     args = ap.parse_args()
     svg = render(args.layer_trace, title=args.title, subtitle=args.subtitle,
-                 step=args.step)
+                 step=args.step, floor=_floor_gb(args.phase_memory))
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(svg)
     print(f"wrote {args.out}")
