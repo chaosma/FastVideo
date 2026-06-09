@@ -9,7 +9,6 @@ using the modular pipeline architecture.
 from fastvideo.fastvideo_args import FastVideoArgs
 from fastvideo.logger import init_logger
 from fastvideo.pipelines.composed_pipeline_base import ComposedPipelineBase
-from fastvideo.pipelines.lora_pipeline import LoRAPipeline
 
 # isort: off
 from fastvideo.pipelines.stages import (ImageEncodingStage, ConditioningStage, DecodingStage, DenoisingStage,
@@ -21,7 +20,7 @@ from fastvideo.models.schedulers.scheduling_flow_unipc_multistep import (FlowUni
 logger = init_logger(__name__)
 
 
-class WanImageToVideoPipeline(LoRAPipeline, ComposedPipelineBase):
+class WanImageToVideoPipeline(ComposedPipelineBase):
 
     _required_config_modules = [
         "text_encoder", "tokenizer", "vae", "transformer", "scheduler", \

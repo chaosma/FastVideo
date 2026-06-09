@@ -12,7 +12,6 @@ from functools import lru_cache
 from fastvideo.fastvideo_args import WorkloadType
 from fastvideo.logger import init_logger
 from fastvideo.pipelines.composed_pipeline_base import ComposedPipelineBase
-from fastvideo.pipelines.lora_pipeline import LoRAPipeline
 
 logger = init_logger(__name__)
 
@@ -62,7 +61,7 @@ class _PipelineRegistry:
         return self.pipelines.get(PipelineType.PREPROCESS.value, {}).get(pipeline_name)
 
     def _try_load_pipeline_cls(self, pipeline_name_in_config: str, pipeline_type: PipelineType,
-                               workload_type: WorkloadType) -> type[ComposedPipelineBase] | type[LoRAPipeline] | None:
+                               workload_type: WorkloadType) -> type[ComposedPipelineBase] | None:
         """Try to load a pipeline class for the given architecture, pipeline type, and workload type."""
         if pipeline_type.value not in self.pipelines:
             return None
@@ -81,7 +80,7 @@ class _PipelineRegistry:
         pipeline_name_in_config: str,
         pipeline_type: PipelineType,
         workload_type: WorkloadType,
-    ) -> type[ComposedPipelineBase] | type[LoRAPipeline]:
+    ) -> type[ComposedPipelineBase]:
         """Resolve pipeline class based on pipeline name in the config, pipeline type, and workload type."""
         if not pipeline_name_in_config:
             logger.warning("No pipeline architecture is specified")

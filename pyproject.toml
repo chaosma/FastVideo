@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fastvideo"
-version = "0.1.7"
-description = "FastVideo"
+version = "0.2.0"
+description = "Minimal Wan-only fork of FastVideo: parquet preprocessing + YAML-driven training"
 readme = "README.md"
 requires-python = ">=3.10"
 classifiers = [
@@ -14,76 +14,47 @@ classifiers = [
 ]
 
 dependencies = [
-    # Core Libraries
-    "scipy==1.14.1",
-    "six==1.16.0",
-    "h5py==3.12.1",
+    # Core
     "requests>=2.32.2",
+    "scipy==1.14.1",          # used by FlowMatchEulerDiscreteScheduler
 
-    # Machine Learning & Transformers
+    # ML / Transformers / Diffusers
     "transformers==4.57.3",
     "tokenizers>=0.20.1",
     "sentencepiece==0.2.0",
-    "timm==1.0.11",
-    "peft>=0.15.0",
     "diffusers>=0.33.1",
+    "accelerate==1.0.1",
     "torch>=2.10.0",
     "torchvision",
     "torchaudio",
+    "einops",
+    "cloudpickle",            # used by fastvideo.models.registry (subprocess model probing)
 
-    # Acceleration & Optimization
-    "accelerate==1.0.1",
-
-    # Computer Vision & Image Processing
-    "opencv-python==4.10.0.84",
+    # Image / video I/O for preprocessing
     "pillow>=10.3.0",
+    "opencv-python==4.10.0.84",
     "imageio==2.36.0",
     "imageio-ffmpeg==0.5.1",
-    "einops",
+    "av",                     # PyAV — preprocessing video reads
 
-    # Experiment Tracking & Logging
+    # Tracking / logging
     "wandb>=0.21.0",
     "loguru",
-    "test-tube==0.7.5",
-    
-    # Miscellaneous Utilities
+
+    # Misc utilities
     "tqdm",
-    "pytest",
     "PyYAML==6.0.1",
     "protobuf>=5.28.3",
-    "gradio==5.32.0",
-    "moviepy>=2.0.0",
-    "flask",
-    "flask_restful",
-    "aiohttp",
-    "aiofiles",
     "huggingface_hub",
-    "cloudpickle",
-    "omegaconf",
+    "ftfy==6.3.1",            # text cleaning during preprocessing
 
-    # System & Monitoring Tools
-    "gpustat",
-    "watch",
-    "remote-pdb",
-
-    # Kernel & Packaging
-    "fastvideo-kernel==0.2.6",
-    "wheel",
-
-    # Training Dependencies
+    # Training dataloader
     "torchdata",
     "pyarrow",
-    "datasets==4.0.0",
-    "av",
+    "datasets==4.0.0",        # workflow/preprocess/components.py
 
-    # Preprocessing Dependencies
-    "torchcodec",
+    # Distributed preprocess driver
     "ray>=2.49.1",
-    "ftfy==6.3.1",
-
-    # Job Runner
-    "fastapi==0.129.0",
-    "uvicorn==0.41.0"
 ]
 
 [tool.uv]
@@ -131,9 +102,6 @@ dev = [ "fastvideo[lint]", "fastvideo[test]", ]
 rocm = [
     "amdsmi",
 ]
-
-[project.scripts]
-fastvideo = "fastvideo.entrypoints.cli.main:main"
 
 [tool.setuptools.packages.find]
 exclude = ["assets*", "docker*", "docs", "scripts*"]
