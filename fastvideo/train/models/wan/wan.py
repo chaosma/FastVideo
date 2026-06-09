@@ -17,6 +17,7 @@ from fastvideo.distributed import (
     get_world_group,
 )
 from fastvideo.forward_context import set_forward_context
+from fastvideo.logger import init_logger
 from fastvideo.models.schedulers.scheduling_flow_match_euler_discrete import (
     FlowMatchEulerDiscreteScheduler, )
 from fastvideo.pipelines import TrainingBatch
@@ -47,6 +48,8 @@ if TYPE_CHECKING:
     from fastvideo.train.utils.training_config import (
         TrainingConfig, )
 
+logger = init_logger(__name__)
+
 try:
     from fastvideo.attention.backends.video_sparse_attn import (
         VideoSparseAttentionMetadataBuilder, )
@@ -55,6 +58,19 @@ try:
 except Exception:
     VideoSparseAttentionMetadataBuilder = None  # type: ignore[assignment]
     VideoMobaAttentionMetadataBuilder = None  # type: ignore[assignment]
+
+
+class _WanVAEStatsStub:
+    """Minimal stand-in for the Wan VAE used during training when the full
+    VAE weights are not loaded. Exposes the constants normalize_dit_input
+    reads from `vae.latents_mean` / `vae.latents_std`."""
+
+    __slots__ = ("latents_mean", "latents_std")
+
+    def __init__(self, latents_mean: list[float],
+                 latents_std: list[float]) -> None:
+        self.latents_mean = latents_mean
+        self.latents_std = latents_std
 
 
 class WanModel(ModelBase):
@@ -135,10 +151,27 @@ class WanModel(ModelBase):
             None,
         ))
         if trainable and ckpt_type:
-            transformer = apply_activation_checkpointing(
-                transformer,
-                checkpointing_type=ckpt_type,
-            )
+            # Activation tracing is opt-out: when capturing a full lifecycle
+            # trace, gradient checkpointing hides intermediate saved tensors
+            # behind its NO_REENTRANT context. Setting
+            # ``FASTVIDEO_ACTIVATION_TRACE_DISABLE_GC=1`` (or any truthy value)
+            # skips the checkpoint wrapper for this run.
+            disable_gc_for_trace = os.environ.get(
+                "FASTVIDEO_ACTIVATION_TRACE_DISABLE_GC",
+                "",
+            ).strip().lower() in {"1", "true", "yes", "on"}
+            if disable_gc_for_trace:
+                logger.warning(
+                    "FASTVIDEO_ACTIVATION_TRACE_DISABLE_GC=1: skipping "
+                    "apply_activation_checkpointing(type=%s). Expect higher "
+                    "peak memory.",
+                    ckpt_type,
+                )
+            else:
+                transformer = apply_activation_checkpointing(
+                    transformer,
+                    checkpointing_type=ckpt_type,
+                )
         return transformer
 
     # ------------------------------------------------------------------
@@ -146,11 +179,31 @@ class WanModel(ModelBase):
     # ------------------------------------------------------------------
 
     def init_preprocessors(self, training_config: TrainingConfig) -> None:
-        self.vae = load_module_from_path(
-            model_path=str(training_config.model_path),
-            module_type="vae",
-            training_config=training_config,
-        )
+        load_vae = bool(
+            getattr(training_config.data, "load_vae_into_training", False))
+        if load_vae:
+            self.vae = load_module_from_path(
+                model_path=str(training_config.model_path),
+                module_type="vae",
+                training_config=training_config,
+            )
+        else:
+            # The training step only reads `vae.latents_mean` /
+            # `vae.latents_std` (in normalize_dit_input). Read them from
+            # the actual model's diffusers `vae/config.json` rather than
+            # the pipeline_config defaults --- the latter still carry
+            # Wan 2.1 (z_dim=16) values even when running the Wan 2.2 5B
+            # model (z_dim=48), which would crash the broadcast in
+            # normalize_dit_input.
+            import json
+            from fastvideo.utils import maybe_download_model
+            local = maybe_download_model(str(training_config.model_path))
+            with open(os.path.join(local, "vae", "config.json")) as f:
+                vae_cfg = json.load(f)
+            self.vae = _WanVAEStatsStub(
+                latents_mean=list(vae_cfg["latents_mean"]),
+                latents_std=list(vae_cfg["latents_std"]),
+            )
 
         self.world_group = get_world_group()
         self.sp_group = get_sp_group()

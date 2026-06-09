@@ -53,7 +53,13 @@ _SCHEDULERS = {
     ("schedulers", "scheduling_flow_match_euler_discrete",
      "FlowMatchEulerDiscreteScheduler"),
     "FlowUniPCMultistepScheduler":
-    ("schedulers", "scheduling_flow_unipc_multistep", "FlowUniPCMultistepScheduler"),
+    ("schedulers", "scheduling_flow_unipc_multistep",
+     "FlowUniPCMultistepScheduler"),
+    # Wan's HF model_index.json declares a UniPCMultistepScheduler; the
+    # WanPipeline overrides it at initialize_pipeline() time, but the
+    # component loader still resolves the class from the config first.
+    "UniPCMultistepScheduler":
+    ("schedulers", "scheduling_unipc_multistep", "UniPCMultistepScheduler"),
 }
 
 _LEGACY_FAST_VIDEO_MODELS = {
