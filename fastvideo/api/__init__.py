@@ -1,32 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-from fastvideo.api.schema import (
-    CompileConfig,
-    ComponentConfig,
-    ContinuationState,
-    EngineConfig,
-    GenerationPlan,
-    GenerationRequest,
-    GeneratorConfig,
-    GpuPoolConfig,
-    InputConfig,
-    OffloadConfig,
-    OutputConfig,
-    ParallelismConfig,
-    PipelineSelection,
-    PlannedStage,
-    PromptEnhancerConfig,
-    PromptSafetyConfig,
-    QuantizationConfig,
-    RequestRuntimeConfig,
-    RunConfig,
-    SamplingConfig,
-    ServeConfig,
-    ServerConfig,
-    StreamingConfig,
-    WarmupConfig,
-)
+"""Public API surface kept by the minimal Wan-only refactor.
+
+Only the symbols that the parquet-preprocessing and YAML-driven
+training paths still import are re-exported here. The full inference
+schema/parser/server surface has been removed.
+"""
 from fastvideo.api.errors import ConfigValidationError
-from fastvideo.api.overrides import apply_overrides, parse_cli_overrides
 from fastvideo.api.presets import (
     InferencePreset,
     PresetStageSpec,
@@ -38,58 +17,18 @@ from fastvideo.api.presets import (
     validate_stage_names,
     validate_stage_overrides,
 )
-from fastvideo.api.parser import (
-    config_to_dict,
-    load_config,
-    load_raw_config,
-    load_run_config,
-    load_serve_config,
-    parse_config,
-)
-from fastvideo.api.results import GenerationResult
 from fastvideo.api.sampling_param import SamplingParam
+from fastvideo.api.schema import ContinuationState
 
 __all__ = [
-    "CompileConfig",
-    "ComponentConfig",
-    "ContinuationState",
     "ConfigValidationError",
-    "EngineConfig",
-    "GenerationResult",
-    "GenerationPlan",
-    "GenerationRequest",
-    "GeneratorConfig",
-    "GpuPoolConfig",
-    "InputConfig",
-    "OffloadConfig",
-    "OutputConfig",
-    "ParallelismConfig",
-    "PipelineSelection",
-    "PlannedStage",
-    "PromptEnhancerConfig",
-    "PromptSafetyConfig",
-    "QuantizationConfig",
-    "RequestRuntimeConfig",
-    "RunConfig",
-    "SamplingConfig",
-    "SamplingParam",
-    "ServeConfig",
-    "ServerConfig",
-    "StreamingConfig",
-    "WarmupConfig",
+    "ContinuationState",
     "InferencePreset",
     "PresetStageSpec",
-    "apply_overrides",
-    "config_to_dict",
-    "load_config",
-    "load_raw_config",
-    "load_run_config",
-    "load_serve_config",
-    "parse_cli_overrides",
+    "SamplingParam",
     "get_all_preset_names",
     "get_preset",
     "get_presets_for_family",
-    "parse_config",
     "register_preset",
     "validate_preset_selection",
     "validate_stage_names",

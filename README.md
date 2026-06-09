@@ -1,157 +1,153 @@
-<div align="center">
-<img src=assets/logos/logo.svg width="30%"/>
-</div>
+# FastVideo (minimal Wan fork)
 
-<p align="center">
-     | <a href="https://hao-ai-lab.github.io/FastVideo"><b>Documentation</b></a> | <a href="https://hao-ai-lab.github.io/FastVideo/inference/inference_quick_start/"><b> Quick Start</b></a> | <a href="https://github.com/hao-ai-lab/FastVideo/discussions/982"  target="_blank"><b>Weekly Dev Meeting</b></a>  | 🟣💬 <a href="https://join.slack.com/t/fastvideo/shared_invite/zt-3f4lao1uq-u~Ipx6Lt4J27AlD2y~IdLQ" target="_blank"> <b>Slack</b> </a> |  🟣💬 <a href="https://github.com/hao-ai-lab/FastVideo/discussions/1097" target="_blank"> <b> WeChat </b> </a> |
-</p>
+A trimmed-down fork of [hao-ai-lab/FastVideo](https://github.com/hao-ai-lab/FastVideo)
+that keeps only the **parquet preprocessing** and **YAML-driven training**
+paths for the **Wan** model family (Wan 2.1 T2V/I2V 1.3B + 14B, Wan 2.2
+TI2V 5B, Wan 2.2 T2V/I2V A14B). Inference servers, ComfyUI, web UI,
+LoRA, distillation, validation, VSA, and every other model family
+(Hunyuan, LTX-2, Cosmos, Gen3C, HYWorld, LongCat, MatrixGame, SD3.5,
+TurboDiffusion, …) are removed.
 
-**FastVideo is a unified post-training and real-time inference framework for accelerated video generation.**
+If you need any of those, use upstream FastVideo.
 
-## NEWS
-- `2026/03/17`: Release Live demo: [Into the Dreamverse: Vibe Directing in FastVideo](https://dreamverse.fastvideo.org/), check out the [Blog](https://haoailab.com/blogs/dreamverse/).
-- `2026/03/13`: Release Live demo: [Create a 5s 1080p Video in 4.5s with FastVideo on a Single GPU](https://1080p.fastvideo.org/), check out the [Blog](https://haoailab.com/blogs/fastvideo_realtime_1080p/).
-- `2025/11/19`: Release [CausalWan2.2 I2V A14B Preview](https://huggingface.co/FastVideo/CausalWan2.2-I2V-A14B-Preview-Diffusers) models, [Blog](https://hao-ai-lab.github.io/blogs/fastvideo_causalwan_preview/) and [Inference Code!](https://github.com/hao-ai-lab/FastVideo/blob/main/examples/inference/basic/basic_self_forcing_causal_wan2_2_i2v.py).
-- `2025/08/04`: Release [FastWan](https://hao-ai-lab.github.io/FastVideo/distillation/dmd) models and [Sparse-Distillation](https://hao-ai-lab.github.io/blogs/fastvideo_post_training/).
-
-### More News
-
-- `2025/06/14`: Release finetuning and inference code for [VSA](https://arxiv.org/pdf/2505.13389).
-- `2025/04/24`: [FastVideo V1](https://hao-ai-lab.github.io/blogs/fastvideo/) is released!
-- `2025/02/18`: Release the inference code for [Sliding Tile Attention](https://hao-ai-lab.github.io/blogs/sta/).
-
-## Key Features
-
-FastVideo has the following features:
-
-- End-to-end post-training support for bidirectional and autoregressive models:
-  - Support full finetuning and LoRA finetuning for state-of-the-art open video DiTs
-  - Data preprocessing pipeline for video, image, and text data
-  - Distribution Matching Distillation (DMD2) stepwise distillation.
-  - Sparse attention with [Video Sparse Attention](https://arxiv.org/pdf/2505.13389)
-  - [Sparse distillation](https://hao-ai-lab.github.io/blogs/fastvideo_post_training/) to achieve >50x denoising speedup
-  - Scalable training with FSDP2, sequence parallelism, and selective activation checkpointing.
-  - Causal distillation through Self-Forcing
-  - See this [page](https://hao-ai-lab.github.io/FastVideo/training/overview/) for full list of supported models and recipes.
-- State-of-the-art performance optimizations for inference
-  - Sequence Parallelism for distributed inference
-  - Multiple state-of-the-art attention backends
-  - User-friendly CLI and Python API
-  - See this [page](https://hao-ai-lab.github.io/FastVideo/inference/optimizations/) for full list of supported optimizations.
-- Diverse hardware and OS support
-  - Support H100, A100, 4090
-  - Support Linux, Windows, MacOS
-  - See this [page](https://hao-ai-lab.github.io/FastVideo/inference/support_matrix/) for full list of supported models, hardware assumptions, and optimization compatibility.
-
-## Getting Started
-
-We recommend using [uv](https://docs.astral.sh/uv/) to create a clean environment. If you previously used Conda, switching to uv generally gives faster and more stable installs.
+## Install
 
 ```bash
-# Create and activate a new uv environment
-uv venv --python 3.12 --seed
-source .venv/bin/activate
-
-# Install FastVideo
-uv pip install fastvideo
+uv pip install -e .
+# or:
+pip install -e .
 ```
 
-Please see our [docs](https://hao-ai-lab.github.io/FastVideo/getting_started/installation/) for more detailed installation instructions.
-
-## Sparse Distillation
-
-For our sparse distillation techniques, please see our [distillation docs](https://hao-ai-lab.github.io/FastVideo/distillation/dmd/) and check out our [blog](https://hao-ai-lab.github.io/blogs/fastvideo_post_training/).
-
-See below for recipes and datasets:
-
-| Model                                                                                 | Sparse Distillation                                                                                             | Dataset                                                                                                  |
-| ------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| [FastWan2.1-T2V-1.3B](https://huggingface.co/FastVideo/FastWan2.1-T2V-1.3B-Diffusers) | [Recipe](https://github.com/hao-ai-lab/FastVideo/tree/main/examples/distill/Wan2.1-T2V/Wan-Syn-Data-480P)       | [FastVideo Synthetic Wan2.1 480P](https://huggingface.co/datasets/FastVideo/Wan-Syn_77x448x832_600k)     |
-| [FastWan2.2-TI2V-5B](https://huggingface.co/FastVideo/FastWan2.2-TI2V-5B-Diffusers)   | [Recipe](https://github.com/hao-ai-lab/FastVideo/tree/main/examples/distill/Wan2.2-TI2V-5B-Diffusers/Data-free) | [FastVideo Synthetic Wan2.2 720P](https://huggingface.co/datasets/FastVideo/Wan2.2-Syn-121x704x1280_32k) |
-
-## Inference
-
-### Generating Your First Video
-
-Here's a minimal example to generate a video using the default settings. Make sure VSA kernels are [installed](https://hao-ai-lab.github.io/FastVideo/attention/vsa/#installation). Create a file called `example.py` with the following code:
-
-```python
-import os
-from fastvideo import VideoGenerator
-
-def main():
-    os.environ["FASTVIDEO_ATTENTION_BACKEND"] = "VIDEO_SPARSE_ATTN"
-
-    # Create a video generator with a pre-trained model
-    generator = VideoGenerator.from_pretrained(
-        "FastVideo/FastWan2.1-T2V-1.3B-Diffusers",
-        num_gpus=1,  # Adjust based on your hardware
-    )
-
-    # Define a prompt for your video
-    prompt = "A curious raccoon peers through a vibrant field of yellow sunflowers, its eyes wide with interest."
-
-    # Generate the video
-    video = generator.generate_video(
-        prompt,
-        output_path="my_videos/",  # Controls where videos are saved
-        save_video=True
-    )
-
-if __name__ == '__main__':
-    main()
-```
-
-Run the script with:
+Optional dev/lint extras:
 
 ```bash
-python example.py
+uv pip install -e .[dev]
+pre-commit install --hook-type pre-commit --hook-type commit-msg
 ```
 
-For a more detailed guide, please see our [inference quick start](https://hao-ai-lab.github.io/FastVideo/inference/inference_quick_start/).
+## Preprocess 4K video → parquet latents
 
-## More Guides
-
-- [Design Overview](https://hao-ai-lab.github.io/FastVideo/design/overview/)
-- [Distillation Guide](https://hao-ai-lab.github.io/FastVideo/distillation/dmd/)
-- [Contribution Guide](https://hao-ai-lab.github.io/FastVideo/contributing/overview/)
-
-## Awesome work using FastVideo or our research projects
-
-- [SGLang](https://github.com/sgl-project/sglang/tree/main/python/sglang/multimodal_gen): SGLang's diffusion inference functionality is based on a fork of FastVideo on Sept. 24, 2025.
-- [DanceGRPO](https://github.com/XueZeyue/DanceGRPO): A unified framework to adapt Group Relative Policy Optimization (GRPO) to visual generation paradigms. Code based on FastVideo.
-- [SRPO](https://github.com/Tencent-Hunyuan/SRPO): A method to directly align the full diffusion trajectory with fine-grained human preference. Code based on FastVideo.
-- [DCM](https://github.com/Vchitect/DCM): Dual-expert consistency model for efficient and high-quality video generation. Code based on FastVideo.
-- [HY-WorldPlay](https://github.com/Tencent-Hunyuan/HY-WorldPlay): An action-conditioned world model model trained using FastVideo framework.
-- [Hunyuan Video 1.5](https://github.com/Tencent-Hunyuan/HunyuanVideo-1.5): A leading lightweight video generation model, where they proposed SSTA based on Sliding Tile Attention.
-- [Kandinsky-5.0](https://github.com/kandinskylab/kandinsky-5): A family of diffusion models for video & image generation, where their NABLA attention includes a Sliding Tile Attention branch.
-- [LongCat Video](https://github.com/meituan-longcat/LongCat-Video): A foundational video generation model with 13.6B parameters with block-sparse attention similar to Video Sparse Attention.
-
-## 🤝 Contributing
-
-We welcome all contributions. Please check out our guide [here](https://hao-ai-lab.github.io/FastVideo/contributing/overview/).
-See details in [development roadmap](https://github.com/hao-ai-lab/FastVideo/issues/899).
-
-## Acknowledgement
-
-We learned the design and reused code from the following projects: [Wan-Video](https://github.com/Wan-Video), [ThunderKittens](https://github.com/HazyResearch/ThunderKittens), [DMD2](https://github.com/tianweiy/DMD2), [diffusers](https://github.com/huggingface/diffusers), [xDiT](https://github.com/xdit-project/xDiT), [vLLM](https://github.com/vllm-project/vllm), [SGLang](https://github.com/sgl-project/sglang). We thank [MBZUAI](https://ifm.mbzuai.ac.ae/), [Anyscale](https://www.anyscale.com/), and [GMI Cloud](https://www.gmicloud.ai/) for their support throughout this project.
-
-## Citation
-
-If you find FastVideo useful, please consider citing our research work:
-
-```bibtex
-@article{zhang2025vsa,
-  title={Vsa: Faster video diffusion with trainable sparse attention},
-  author={Zhang, Peiyuan and Chen, Yongqi and Huang, Haofeng and Lin, Will and Liu, Zhengzhong and Stoica, Ion and Xing, Eric and Zhang, Hao},
-  journal={arXiv preprint arXiv:2505.13389},
-  year={2025}
-}
-
-@article{zhang2025fast,
-  title={Fast video generation with sliding tile attention},
-  author={Zhang, Peiyuan and Chen, Yongqi and Su, Runlong and Ding, Hangliang and Stoica, Ion and Liu, Zhengzhong and Zhang, Hao},
-  journal={arXiv preprint arXiv:2502.04507},
-  year={2025}
-}
+```bash
+# Place raw clips in data/raw_4k/ along with a metadata.csv
+# (file_path,caption per row).
+bash scripts/4k_milestone/preprocess_4k.sh --rung 2
+# Output: data/preprocessed_4k/training_dataset/worker_*/...
 ```
+
+Rung map (number of source frames; latent timesteps satisfy `(N-1) % 4 == 0`):
+
+| Rung | Frames | Latent t | Notes |
+|------|--------|----------|-------|
+| 0    | 77     | 20       | Full Wan 2.1 native length |
+| 1    | 17     | 5        | |
+| 2    | 5      | 2        | Default; cheapest smoke test |
+| 3    | 1      | 1        | Image mode |
+
+For Wan 2.2 5B (16× spatial VAE) override the model:
+
+```bash
+MODEL_PATH=Wan-AI/Wan2.2-TI2V-5B-Diffusers \
+MAX_HEIGHT=2176 \
+bash scripts/4k_milestone/preprocess_4k.sh --rung 2
+```
+
+## Train
+
+```bash
+NUM_GPUS=4 bash examples/train/run.sh \
+    examples/train/configs/fine_tuning/wan/t2v_4k.yaml \
+    --training.data.data_path data/preprocessed_4k/training_dataset \
+    --training.distributed.sp_size 4 \
+    --training.distributed.hsdp_shard_dim 4
+```
+
+Quick dry-run (no GPU step, just config parse + dataloader build):
+
+```bash
+bash examples/train/run.sh \
+    examples/train/configs/fine_tuning/wan/t2v_4k.yaml \
+    --dry-run --training.distributed.num_gpus 1
+```
+
+The trainer entry is `fastvideo/train/entrypoint/train.py` and the only
+training method kept is `FineTuneMethod`
+(`fastvideo.train.methods.fine_tuning.finetune`). Checkpoints land in
+`outputs/<run_name>/checkpoint-<step>/dcp/` (DCP-sharded).
+
+To convert a DCP shard set into a Diffusers checkpoint:
+
+```bash
+python -m fastvideo.train.entrypoint.dcp_to_diffusers \
+    --config examples/train/configs/fine_tuning/wan/t2v_4k.yaml \
+    --checkpoint-dir outputs/<run_name>/checkpoint-<step>
+```
+
+## Tests
+
+```bash
+pytest tests/             # imports + dry-run smoke
+pytest -k 'dry_run'       # the dry-run test alone (uses data/real_4k_rung2)
+```
+
+## Repository layout
+
+```
+fastvideo/
+├── api/              # SamplingParam + presets only — drives Wan negative-prompt loading
+├── attention/        # SDPA / FlashAttention selectors
+├── configs/          # Wan-only model + pipeline configs
+├── dataset/          # parquet map-style dataloader + preprocessing datasets
+├── distributed/      # SP / FSDP / NCCL helpers
+├── hooks/, layers/, logging_utils/, platforms/, third_party/
+├── models/
+│   ├── dits/wanvideo.py      # WanTransformer3DModel
+│   ├── vaes/{wanvae,common,autoencoder_kl}.py
+│   ├── encoders/{t5,t5_hf,clip,vision,base}.py
+│   ├── schedulers/{flow_match_euler_discrete,flow_unipc_multistep}.py
+│   └── loader/, registry.py
+├── pipelines/
+│   ├── basic/wan/{wan_pipeline,wan_i2v_pipeline,presets}.py
+│   ├── preprocess/wan/wan_preprocess_pipelines.py + v1_preprocessing_new.py
+│   └── stages/  # eleven Wan-relevant stages
+├── train/                   # YAML-driven trainer (the live training surface)
+│   ├── entrypoint/train.py + dcp_to_diffusers.py
+│   ├── methods/fine_tuning/finetune.py
+│   ├── models/wan/wan.py
+│   └── callbacks/{ema,grad_clip}.py + utils/
+├── training/                # SHARED trainer utilities (training_utils,
+│                            # activation_checkpoint, checkpointing_utils,
+│                            # trackers) — the *_pipeline.py classes were dropped
+└── workflow/preprocess/     # preprocess workflow orchestration
+examples/train/configs/fine_tuning/wan/{t2v,t2v_4k}.yaml
+scripts/4k_milestone/        # preprocess_4k.sh + synthetic data generators
+scripts/checkpoint_conversion/wan_to_diffusers.py
+reports/                     # 4K H200 + 4K Wan2.2-5B benchmark writeups
+```
+
+## What's intentionally missing
+
+- Inference: there is no `fastvideo` CLI, no OpenAI-style server, no
+  `VideoGenerator`. To sample from a trained model, convert the DCP
+  checkpoint to Diffusers format and run inference with upstream
+  FastVideo or vanilla diffusers.
+- Validation during training: `ValidationCallback` was removed because
+  the canonical 4K configs ran with it disabled and re-enabling needs
+  the inference pipeline.
+- LoRA / VSA / distillation (DMD, KD, self-forcing, dfsft).
+- ComfyUI nodes, web UI, gradio demos, modal/serverless harness.
+- All non-Wan model families. `fastvideo/models/dits/` keeps only
+  `wanvideo.py` (+ `base.py`).
+
+## Hardware notes
+
+The `reports/` directory has detailed 4K results:
+
+- **Wan 2.1 T2V 1.3B on 4× H200**: rung 2 ≈ 4.5 s/step, rung 1 ≈ 20 s,
+  rung 0 ≈ 288 s. Compute-bound on attention; H100 SXM matches H200 at
+  this arithmetic intensity. Peak memory 58 GB/GPU at rung 0.
+- **Wan 2.2 TI2V 5B on 4× H200**: rung 2 ≈ 2.15 s/step, rung 1 ≈ 4.89 s,
+  rung 0 ≈ 40.6 s. The 16× spatial VAE buys 4× fewer DiT tokens, so the
+  larger 5B is ~7× faster than 1.3B at rung 0.
+
+For rung-2 smoke tests on a 4× RTX 4090 box, the 1.3B model fits and
+runs in single-digit seconds per step.

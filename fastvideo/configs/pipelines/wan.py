@@ -6,9 +6,7 @@ import torch
 
 from fastvideo.configs.models import DiTConfig, EncoderConfig, VAEConfig
 from fastvideo.configs.models.dits import WanVideoConfig
-from fastvideo.configs.models.dits.matrixgame import MatrixGameWanVideoConfig
-from fastvideo.configs.models.encoders import (BaseEncoderOutput, CLIPVisionConfig, T5Config,
-                                               WAN2_1ControlCLIPVisionConfig)
+from fastvideo.configs.models.encoders import (BaseEncoderOutput, CLIPVisionConfig, T5Config)
 from fastvideo.configs.models.vaes import WanVAEConfig
 from fastvideo.configs.pipelines.base import PipelineConfig
 
@@ -28,7 +26,6 @@ def t5_postprocess_text(outputs: BaseEncoderOutput) -> torch.Tensor:
 class WanT2V480PConfig(PipelineConfig):
     """Base configuration for Wan T2V 1.3B pipeline architecture."""
 
-    # WanConfig-specific parameters with defaults
     # DiT
     dit_config: DiTConfig = field(default_factory=WanVideoConfig)
     # VAE
@@ -49,11 +46,6 @@ class WanT2V480PConfig(PipelineConfig):
     vae_precision: str = "fp32"
     text_encoder_precisions: tuple[str, ...] = field(default_factory=lambda: ("fp32", ))
 
-    # self-forcing params
-    warp_denoising_step: bool = True
-
-    # WanConfig-specific added parameters
-
     def __post_init__(self):
         self.vae_config.load_encoder = False
         self.vae_config.load_decoder = True
@@ -63,9 +55,6 @@ class WanT2V480PConfig(PipelineConfig):
 class WanT2V720PConfig(WanT2V480PConfig):
     """Base configuration for Wan T2V 14B 720P pipeline architecture."""
 
-    # WanConfig-specific parameters with defaults
-
-    # Denoising stage
     flow_shift: float | None = 5.0
 
 
@@ -73,9 +62,6 @@ class WanT2V720PConfig(WanT2V480PConfig):
 class WanI2V480PConfig(WanT2V480PConfig):
     """Base configuration for Wan I2V 14B 480P pipeline architecture."""
 
-    # WanConfig-specific parameters with defaults
-
-    # Precision for each component
     image_encoder_config: EncoderConfig = field(default_factory=CLIPVisionConfig)
     image_encoder_precision: str = "fp32"
 
@@ -88,34 +74,13 @@ class WanI2V480PConfig(WanT2V480PConfig):
 class WanI2V720PConfig(WanI2V480PConfig):
     """Base configuration for Wan I2V 14B 720P pipeline architecture."""
 
-    # WanConfig-specific parameters with defaults
-
-    # Denoising stage
     flow_shift: float | None = 5.0
 
 
 @dataclass
-class WANV2VConfig(WanI2V480PConfig):
-    """Configuration for WAN2.1 1.3B Control pipeline."""
-
-    image_encoder_config: EncoderConfig = field(default_factory=WAN2_1ControlCLIPVisionConfig)
-    # CLIP encoder precision
-    image_encoder_precision: str = 'bf16'
-
-
-@dataclass
-class FastWan2_1_T2V_480P_Config(WanT2V480PConfig):
-    """Base configuration for FastWan T2V 1.3B 480P pipeline architecture with DMD"""
-
-    # WanConfig-specific parameters with defaults
-
-    # Denoising stage
-    flow_shift: float | None = 8.0
-    dmd_denoising_steps: list[int] | None = field(default_factory=lambda: [1000, 757, 522])
-
-
-@dataclass
 class Wan2_2_TI2V_5B_Config(WanT2V480PConfig):
+    """Wan 2.2 TI2V 5B (16x VAE)."""
+
     flow_shift: float | None = 5.0
     ti2v_task: bool = True
     expand_timesteps: bool = True
@@ -127,19 +92,11 @@ class Wan2_2_TI2V_5B_Config(WanT2V480PConfig):
 
 
 @dataclass
-class FastWan2_2_TI2V_5B_Config(Wan2_2_TI2V_5B_Config):
-    flow_shift: float | None = 5.0
-    dmd_denoising_steps: list[int] | None = field(default_factory=lambda: [1000, 757, 522])
-
-
-@dataclass
 class Wan2_2_T2V_A14B_Config(WanT2V480PConfig):
+    """Wan 2.2 T2V A14B (mixture-of-experts)."""
+
     flow_shift: float | None = 12.0
     boundary_ratio: float | None = 0.875
-
-    # self-forcing params
-    dmd_denoising_steps: list[int] | None = field(default_factory=lambda: [1000, 750, 500, 250])
-    warp_denoising_step: bool = True
 
     def __post_init__(self) -> None:
         self.dit_config.boundary_ratio = self.boundary_ratio
@@ -147,57 +104,11 @@ class Wan2_2_T2V_A14B_Config(WanT2V480PConfig):
 
 @dataclass
 class Wan2_2_I2V_A14B_Config(WanI2V480PConfig):
+    """Wan 2.2 I2V A14B (mixture-of-experts)."""
+
     flow_shift: float | None = 5.0
     boundary_ratio: float | None = 0.900
 
     def __post_init__(self) -> None:
         super().__post_init__()
         self.dit_config.boundary_ratio = self.boundary_ratio
-
-
-# =============================================
-# ============= Causal Self-Forcing =============
-# =============================================
-@dataclass
-class SelfForcingWanT2V480PConfig(WanT2V480PConfig):
-    is_causal: bool = True
-    flow_shift: float | None = 5.0
-    dmd_denoising_steps: list[int] | None = field(default_factory=lambda: [1000, 750, 500, 250])
-    warp_denoising_step: bool = True
-
-
-@dataclass
-class SelfForcingWan2_2_T2V480PConfig(Wan2_2_T2V_A14B_Config):
-    is_causal: bool = True
-    flow_shift: float | None = 12.0
-    boundary_ratio: float | None = 0.875
-    dmd_denoising_steps: list[int] | None = field(default_factory=lambda: [1000, 850, 700, 550, 350, 275, 200, 125])
-    warp_denoising_step: bool = True
-
-    def __post_init__(self) -> None:
-        self.vae_config.load_encoder = True
-        self.vae_config.load_decoder = True
-
-
-# =============================================
-# ============= Matrix Game ===================
-# =============================================
-@dataclass
-class MatrixGameBaseI2V480PConfig(WanI2V480PConfig):
-    dit_config: DiTConfig = field(default_factory=MatrixGameWanVideoConfig)
-    flow_shift: float | None = 5.0
-
-
-@dataclass
-class MatrixGameI2V480PConfig(WanI2V480PConfig):
-    dit_config: DiTConfig = field(default_factory=MatrixGameWanVideoConfig)
-
-    image_encoder_config: EncoderConfig = field(default_factory=WAN2_1ControlCLIPVisionConfig)
-
-    is_causal: bool = True
-    flow_shift: float | None = 5.0
-    dmd_denoising_steps: list[int] | None = field(default_factory=lambda: [1000, 666, 333])
-    warp_denoising_step: bool = True
-    context_noise: int = 0
-    num_frames_per_block: int = 3
-    # sliding_window_num_frames: int = 15
