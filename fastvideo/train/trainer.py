@@ -14,6 +14,7 @@ from fastvideo.distributed import get_sp_group, get_world_group
 from fastvideo.train.callbacks.callback import CallbackDict
 from fastvideo.train.methods.base import TrainingMethod
 from fastvideo.train.utils.tracking import build_tracker
+from fastvideo.training import memory_probe
 
 if TYPE_CHECKING:
     from fastvideo.train.utils.training_config import (
@@ -124,6 +125,13 @@ class Trainer:
         # have advanced the RNG as a side-effect.
         if (checkpoint_manager is not None and resume_from_checkpoint):
             checkpoint_manager.load_rng_snapshot(resume_from_checkpoint, )
+        probe = memory_probe.maybe_init_from_env(self.global_rank)
+        if probe is not None:
+            transformer = getattr(method.student, "transformer", None)
+            optimizer = next(iter(method.get_optimizers(start_step)), None)
+            if transformer is not None:
+                probe.install(transformer, optimizer=optimizer)
+
         progress = tqdm(
             range(start_step + 1, max_steps + 1),
             initial=start_step,
@@ -131,6 +139,8 @@ class Trainer:
             disable=self.local_rank > 0,
         )
         for step in progress:
+            memory_probe.step_begin()
+            memory_probe.snap("P0_idle")
             t0 = time.perf_counter()
 
             # Accumulate on GPU during grad-accum; materialise
@@ -139,16 +149,21 @@ class Trainer:
             metric_sums: dict[str, float | torch.Tensor] = {}
             for accum_iter in range(grad_accum):
                 batch = next(data_stream)
+                memory_probe.snap("P1_inputs_done")
+                memory_probe.snap("P2_fwd_start")
                 loss_map, outputs, step_metrics = (method.single_train_step(
                     batch,
                     step,
                 ))
+                memory_probe.snap("P4_fwd_end")
 
                 method.backward(
                     loss_map,
                     outputs,
                     grad_accum_rounds=grad_accum,
                 )
+                memory_probe.snap("P5_bwd_peak")
+                memory_probe.snap("P6_post_bwd")
 
                 for k, v in loss_map.items():
                     if isinstance(v, torch.Tensor):
@@ -172,7 +187,10 @@ class Trainer:
                 iteration=step,
             )
             method.optimizers_schedulers_step(step)
+            memory_probe.snap("P7_opt_done")
             method.optimizers_zero_grad(step)
+            memory_probe.snap("P0_next")
+            memory_probe.step_end()
 
             # Single CPU sync point: materialise GPU tensors
             # to float right before logging.
