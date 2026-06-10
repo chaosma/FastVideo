@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import sys
 from typing import Any, Literal
 
 import torch
@@ -10,6 +11,7 @@ import torch.nn.functional as F
 
 from fastvideo.train.methods.base import TrainingMethod, LogScalar
 from fastvideo.train.models.base import ModelBase
+from fastvideo.train.utils.activation_trace import maybe_activation_trace
 from fastvideo.train.utils.optimizer import (
     build_optimizer_and_scheduler, )
 
@@ -55,64 +57,91 @@ class FineTuneMethod(TrainingMethod):
             dict[str, Any],
             dict[str, LogScalar],
     ]:
-        del iteration
-        training_batch = self.student.prepare_batch(
-            batch,
-            generator=self.cuda_generator,
-            latents_source="data",
+        trace = maybe_activation_trace(
+            self.student.transformer,
+            step=iteration,
+            metadata={
+                "method": self.__class__.__name__,
+                "model": self.student.__class__.__name__,
+                "transformer": self.student.transformer.__class__.__name__,
+                "attn_kind": self._attn_kind,
+            },
         )
-
-        if training_batch.latents is None:
-            raise RuntimeError("prepare_batch() must set "
-                               "TrainingBatch.latents")
-        if training_batch.noisy_model_input is None:
-            raise RuntimeError("prepare_batch() must set "
-                               "TrainingBatch.noisy_model_input")
-        if training_batch.noise is None:
-            raise RuntimeError("prepare_batch() must set "
-                               "TrainingBatch.noise")
-        if training_batch.sigmas is None:
-            raise RuntimeError("prepare_batch() must set "
-                               "TrainingBatch.sigmas")
-        if training_batch.timesteps is None:
-            raise RuntimeError("prepare_batch() must set "
-                               "TrainingBatch.timesteps")
-
-        clean_latents = training_batch.latents
-        noisy_latents = (training_batch.noisy_model_input.permute(0, 2, 1, 3, 4))
-        noise = training_batch.noise.permute(0, 2, 1, 3, 4)
-        sigmas = training_batch.sigmas
-        timesteps = training_batch.timesteps
-
-        pred = self.student.predict_noise(
-            noisy_latents,
-            timesteps,
-            training_batch,
-            conditional=True,
-            attn_kind=self._attn_kind,
-        )
-
-        if bool(self.training_config.model.precondition_outputs):
-            pred_x0 = noisy_latents - pred * sigmas
-            loss = F.mse_loss(pred_x0.float(), clean_latents.float())
-        else:
-            target = noise - clean_latents
-            loss = F.mse_loss(pred.float(), target.float())
-
-        attn_metadata = training_batch.attn_metadata_vsa if self._attn_kind == "vsa" else training_batch.attn_metadata
-
-        loss_map = {
-            "total_loss": loss,
-            "finetune_loss": loss,
-        }
-        outputs: dict[str, Any] = {
-            "_fv_backward": (
-                training_batch.timesteps,
-                attn_metadata,
+        trace.__enter__()
+        try:
+            trace.set_phase("prepare_batch")
+            training_batch = self.student.prepare_batch(
+                batch,
+                generator=self.cuda_generator,
+                latents_source="data",
             )
-        }
-        metrics: dict[str, LogScalar] = {}
-        return loss_map, outputs, metrics
+
+            if training_batch.latents is None:
+                raise RuntimeError("prepare_batch() must set "
+                                   "TrainingBatch.latents")
+            if training_batch.noisy_model_input is None:
+                raise RuntimeError("prepare_batch() must set "
+                                   "TrainingBatch.noisy_model_input")
+            if training_batch.noise is None:
+                raise RuntimeError("prepare_batch() must set "
+                                   "TrainingBatch.noise")
+            if training_batch.sigmas is None:
+                raise RuntimeError("prepare_batch() must set "
+                                   "TrainingBatch.sigmas")
+            if training_batch.timesteps is None:
+                raise RuntimeError("prepare_batch() must set "
+                                   "TrainingBatch.timesteps")
+
+            trace.log_marker("training_batch", {
+                "latents": training_batch.latents,
+                "noisy_model_input": training_batch.noisy_model_input,
+                "noise": training_batch.noise,
+                "sigmas": training_batch.sigmas,
+                "timesteps": training_batch.timesteps,
+                "raw_latent_shape": training_batch.raw_latent_shape,
+            })
+
+            clean_latents = training_batch.latents
+            noisy_latents = (training_batch.noisy_model_input.permute(0, 2, 1, 3, 4))
+            noise = training_batch.noise.permute(0, 2, 1, 3, 4)
+            sigmas = training_batch.sigmas
+            timesteps = training_batch.timesteps
+
+            trace.set_phase("forward")
+            pred = self.student.predict_noise(
+                noisy_latents,
+                timesteps,
+                training_batch,
+                conditional=True,
+                attn_kind=self._attn_kind,
+            )
+
+            trace.set_phase("loss")
+            if bool(self.training_config.model.precondition_outputs):
+                pred_x0 = noisy_latents - pred * sigmas
+                loss = F.mse_loss(pred_x0.float(), clean_latents.float())
+            else:
+                target = noise - clean_latents
+                loss = F.mse_loss(pred.float(), target.float())
+
+            attn_metadata = training_batch.attn_metadata_vsa if self._attn_kind == "vsa" else training_batch.attn_metadata
+
+            loss_map = {
+                "total_loss": loss,
+                "finetune_loss": loss,
+            }
+            outputs: dict[str, Any] = {
+                "_fv_backward": (
+                    training_batch.timesteps,
+                    attn_metadata,
+                ),
+                "_fv_activation_trace": trace,
+            }
+            metrics: dict[str, LogScalar] = {}
+            return loss_map, outputs, metrics
+        except BaseException:
+            trace.__exit__(*sys.exc_info())
+            raise
 
     # TrainingMethod override: backward
     def backward(
@@ -123,19 +152,30 @@ class FineTuneMethod(TrainingMethod):
         grad_accum_rounds: int = 1,
     ) -> None:
         grad_accum_rounds = max(1, int(grad_accum_rounds))
+        trace = outputs.get("_fv_activation_trace")
+        if trace is not None:
+            trace.set_phase("backward")
         ctx = outputs.get("_fv_backward")
-        if ctx is None:
-            super().backward(
-                loss_map,
-                outputs,
-                grad_accum_rounds=grad_accum_rounds,
-            )
-            return
-        self.student.backward(
-            loss_map["total_loss"],
-            ctx,
-            grad_accum_rounds=grad_accum_rounds,
-        )
+        exc_info = (None, None, None)
+        try:
+            if ctx is None:
+                super().backward(
+                    loss_map,
+                    outputs,
+                    grad_accum_rounds=grad_accum_rounds,
+                )
+            else:
+                self.student.backward(
+                    loss_map["total_loss"],
+                    ctx,
+                    grad_accum_rounds=grad_accum_rounds,
+                )
+        except BaseException:
+            exc_info = sys.exc_info()
+            raise
+        finally:
+            if trace is not None:
+                trace.__exit__(*exc_info)
 
     # TrainingMethod override: get_optimizers
     def get_optimizers(
