@@ -57,6 +57,17 @@ except Exception:
     VideoMobaAttentionMetadataBuilder = None  # type: ignore[assignment]
 
 
+class _WanVAEStatsStub:
+    """VAE stand-in for training: only latents_mean/latents_std are needed."""
+
+    __slots__ = ("latents_mean", "latents_std")
+
+    def __init__(self, latents_mean: list[float],
+                 latents_std: list[float]) -> None:
+        self.latents_mean = latents_mean
+        self.latents_std = latents_std
+
+
 class WanModel(ModelBase):
     """Wan per-role model: owns transformer + noise_scheduler."""
 
@@ -146,10 +157,19 @@ class WanModel(ModelBase):
     # ------------------------------------------------------------------
 
     def init_preprocessors(self, training_config: TrainingConfig) -> None:
-        self.vae = load_module_from_path(
-            model_path=str(training_config.model_path),
-            module_type="vae",
-            training_config=training_config,
+        # Training reads from pre-encoded latents, so the only thing we need
+        # from the VAE is its latent normalization statistics
+        # (latents_mean/latents_std). Read those numbers straight from the VAE
+        # config instead of loading the full VAE weights onto the device, which
+        # saves the VAE's memory footprint.
+        import json
+        from fastvideo.utils import maybe_download_model
+        local = maybe_download_model(str(training_config.model_path))
+        with open(os.path.join(local, "vae", "config.json")) as f:
+            vae_cfg = json.load(f)
+        self.vae = _WanVAEStatsStub(
+            latents_mean=list(vae_cfg["latents_mean"]),
+            latents_std=list(vae_cfg["latents_std"]),
         )
 
         self.world_group = get_world_group()

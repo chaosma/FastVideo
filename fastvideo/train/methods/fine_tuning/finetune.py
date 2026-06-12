@@ -10,6 +10,7 @@ import torch.nn.functional as F
 
 from fastvideo.train.methods.base import TrainingMethod, LogScalar
 from fastvideo.train.models.base import ModelBase
+from fastvideo.train.utils.activation_trace import maybe_activation_trace
 from fastvideo.train.utils.optimizer import (
     build_optimizer_and_scheduler, )
 
@@ -55,7 +56,6 @@ class FineTuneMethod(TrainingMethod):
             dict[str, Any],
             dict[str, LogScalar],
     ]:
-        del iteration
         training_batch = self.student.prepare_batch(
             batch,
             generator=self.cuda_generator,
@@ -84,13 +84,17 @@ class FineTuneMethod(TrainingMethod):
         sigmas = training_batch.sigmas
         timesteps = training_batch.timesteps
 
-        pred = self.student.predict_noise(
-            noisy_latents,
-            timesteps,
-            training_batch,
-            conditional=True,
-            attn_kind=self._attn_kind,
-        )
+        # Hooks only need to cover predict_noise: PyTorch stores the unpack
+        # hook inside each SavedTensor at pack time, so it fires during
+        # backward even after this context exits.
+        with maybe_activation_trace(self.student.transformer, step=iteration):
+            pred = self.student.predict_noise(
+                noisy_latents,
+                timesteps,
+                training_batch,
+                conditional=True,
+                attn_kind=self._attn_kind,
+            )
 
         if bool(self.training_config.model.precondition_outputs):
             pred_x0 = noisy_latents - pred * sigmas
