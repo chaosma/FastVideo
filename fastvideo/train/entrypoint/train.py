@@ -66,6 +66,15 @@ def run_training_from_config(
         tc.distributed.sp_size,
     )
 
+    # Start memory recording BEFORE model load so warmup allocations are
+    # captured from zero (no-op unless FASTVIDEO_MEM_SNAPSHOT_WARMUP=1). Skip on
+    # a dry run: it returns before the trainer (and thus before finalize()), so
+    # recording would stay enabled with no dump.
+    if not dry_run:
+        from fastvideo.distributed import get_world_group
+        from fastvideo.memory_tracking import begin_warmup_recording
+        begin_warmup_recording(get_world_group().rank)
+
     _, method, dataloader, start_step = build_from_config(cfg)
 
     if dry_run:

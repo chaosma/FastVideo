@@ -190,7 +190,9 @@ class TrainingMethod(torch.nn.Module, ABC):
                     if len(opt.state.get(p, {})) > 0:
                         continue
                     opt.state[p] = {
-                        "step": torch.tensor(0.0),
+                        # step must live on the param's device, else the fused
+                        # AdamW kernel rejects it ("state_steps is on cpu").
+                        "step": torch.tensor(0.0, device=p.device),
                         "exp_avg": torch.zeros_like(p),
                         "exp_avg_sq": torch.zeros_like(p),
                     }

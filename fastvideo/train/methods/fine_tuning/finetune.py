@@ -8,6 +8,7 @@ from typing import Any, Literal
 import torch
 import torch.nn.functional as F
 
+from fastvideo.memory_tracking import mem_region
 from fastvideo.train.methods.base import TrainingMethod, LogScalar
 from fastvideo.train.models.base import ModelBase
 from fastvideo.train.utils.activation_trace import maybe_activation_trace
@@ -56,11 +57,12 @@ class FineTuneMethod(TrainingMethod):
             dict[str, Any],
             dict[str, LogScalar],
     ]:
-        training_batch = self.student.prepare_batch(
-            batch,
-            generator=self.cuda_generator,
-            latents_source="data",
-        )
+        with mem_region("prepare_batch"):
+            training_batch = self.student.prepare_batch(
+                batch,
+                generator=self.cuda_generator,
+                latents_source="data",
+            )
 
         if training_batch.latents is None:
             raise RuntimeError("prepare_batch() must set "
@@ -87,7 +89,8 @@ class FineTuneMethod(TrainingMethod):
         # Hooks only need to cover predict_noise: PyTorch stores the unpack
         # hook inside each SavedTensor at pack time, so it fires during
         # backward even after this context exits.
-        with maybe_activation_trace(self.student.transformer, step=iteration):
+        with mem_region("dit_forward"), \
+             maybe_activation_trace(self.student.transformer, step=iteration):
             pred = self.student.predict_noise(
                 noisy_latents,
                 timesteps,
@@ -96,12 +99,13 @@ class FineTuneMethod(TrainingMethod):
                 attn_kind=self._attn_kind,
             )
 
-        if bool(self.training_config.model.precondition_outputs):
-            pred_x0 = noisy_latents - pred * sigmas
-            loss = F.mse_loss(pred_x0.float(), clean_latents.float())
-        else:
-            target = noise - clean_latents
-            loss = F.mse_loss(pred.float(), target.float())
+        with mem_region("loss"):
+            if bool(self.training_config.model.precondition_outputs):
+                pred_x0 = noisy_latents - pred * sigmas
+                loss = F.mse_loss(pred_x0.float(), clean_latents.float())
+            else:
+                target = noise - clean_latents
+                loss = F.mse_loss(pred.float(), target.float())
 
         attn_metadata = training_batch.attn_metadata_vsa if self._attn_kind == "vsa" else training_batch.attn_metadata
 
@@ -129,17 +133,19 @@ class FineTuneMethod(TrainingMethod):
         grad_accum_rounds = max(1, int(grad_accum_rounds))
         ctx = outputs.get("_fv_backward")
         if ctx is None:
-            super().backward(
-                loss_map,
-                outputs,
+            with mem_region("backward"):
+                super().backward(
+                    loss_map,
+                    outputs,
+                    grad_accum_rounds=grad_accum_rounds,
+                )
+            return
+        with mem_region("backward"):
+            self.student.backward(
+                loss_map["total_loss"],
+                ctx,
                 grad_accum_rounds=grad_accum_rounds,
             )
-            return
-        self.student.backward(
-            loss_map["total_loss"],
-            ctx,
-            grad_accum_rounds=grad_accum_rounds,
-        )
 
     # TrainingMethod override: get_optimizers
     def get_optimizers(

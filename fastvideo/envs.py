@@ -35,6 +35,12 @@ if TYPE_CHECKING:
     FASTVIDEO_TORCH_PROFILER_WARMUP_STEPS: int = 1
     FASTVIDEO_TORCH_PROFILER_ACTIVE_STEPS: int = 2
     FASTVIDEO_TORCH_PROFILE_REGIONS: str = ""
+    FASTVIDEO_MEM_SNAPSHOT_DIR: str | None = None
+    FASTVIDEO_MEM_SNAPSHOT_STEPS: str = ""
+    FASTVIDEO_MEM_SNAPSHOT_RANK: int = 0
+    FASTVIDEO_MEM_SNAPSHOT_MAX_ENTRIES: int = 1000000
+    FASTVIDEO_MEM_SNAPSHOT_STACKS: str = "all"
+    FASTVIDEO_MEM_SNAPSHOT_WARMUP: bool = False
     FASTVIDEO_SERVER_DEV_MODE: bool = False
     FASTVIDEO_STAGE_LOGGING: bool = False
     FASTVIDEO_HOST_IP: str = ""
@@ -251,6 +257,40 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv("FASTVIDEO_TORCH_PROFILER_ACTIVE_STEPS", "2")),
     "FASTVIDEO_TORCH_PROFILE_REGIONS":
     lambda: os.getenv("FASTVIDEO_TORCH_PROFILE_REGIONS", ""),
+
+    # Per-allocation CUDA memory event tracking (fastvideo/memory_tracking.py).
+    # If FASTVIDEO_MEM_SNAPSHOT_DIR is set, the trainer records every CUDA
+    # caching-allocator event (real cudaMalloc/cudaFree segment events AND
+    # reserved-space block alloc/free) on one rank for the selected step(s) and
+    # dumps a `_dump_snapshot` pickle per step.
+    "FASTVIDEO_MEM_SNAPSHOT_DIR":
+    lambda: (None if os.getenv("FASTVIDEO_MEM_SNAPSHOT_DIR", None) is None else
+             os.path.expanduser(os.getenv("FASTVIDEO_MEM_SNAPSHOT_DIR", "."))),
+
+    # Which 1-based training steps to capture: a comma list (e.g. "5" or
+    # "3,7") or "all". Empty means no step is captured even if DIR is set.
+    "FASTVIDEO_MEM_SNAPSHOT_STEPS":
+    lambda: os.getenv("FASTVIDEO_MEM_SNAPSHOT_STEPS", ""),
+
+    # Global rank that performs the recording ("one card"). Default 0.
+    "FASTVIDEO_MEM_SNAPSHOT_RANK":
+    lambda: int(os.getenv("FASTVIDEO_MEM_SNAPSHOT_RANK", "0")),
+
+    # Ring-buffer capacity for recorded allocation events.
+    "FASTVIDEO_MEM_SNAPSHOT_MAX_ENTRIES":
+    lambda: int(os.getenv("FASTVIDEO_MEM_SNAPSHOT_MAX_ENTRIES", "1000000")),
+
+    # Stack capture depth for each event: "all" (Python + C++) or "python".
+    "FASTVIDEO_MEM_SNAPSHOT_STACKS":
+    lambda: os.getenv("FASTVIDEO_MEM_SNAPSHOT_STACKS", "all"),
+
+    # If set, start recording at process entry (before model load) so the
+    # WARMUP allocations are captured, and record CONTINUOUSLY through the last
+    # step in FASTVIDEO_MEM_SNAPSHOT_STEPS, dumping once. This makes the absolute
+    # memory curve exact (it starts from zero) instead of reconstructing a
+    # baseline. Without it, recording brackets each selected step individually.
+    "FASTVIDEO_MEM_SNAPSHOT_WARMUP":
+    lambda: bool(int(os.getenv("FASTVIDEO_MEM_SNAPSHOT_WARMUP", "0"))),
 
     # If set, fastvideo will run in development mode, which will enable
     # some additional endpoints for developing and debugging,

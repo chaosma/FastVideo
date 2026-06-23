@@ -36,12 +36,23 @@ def build_optimizer_and_scheduler(
         raise ValueError("No trainable parameters passed to "
                          "build_optimizer_and_scheduler")
 
+    # FASTVIDEO_ADAM_FUSED=1 selects the fused AdamW kernel (in-place update,
+    # no large foreach intermediate buffers). Unset -> foreach default
+    # (multi-tensor), i.e. baseline behaviour unchanged. capturable=True keeps
+    # the per-param `step` tensor on-device, which the fused kernel requires
+    # (otherwise: "state_steps is on cpu, different from other tensors on cuda").
+    import os
+    fused = (os.environ.get("FASTVIDEO_ADAM_FUSED", "").strip().lower()
+             in ("1", "true", "yes", "on")) or None
+
     optimizer = torch.optim.AdamW(
         params,
         lr=float(learning_rate),
         betas=betas,
         weight_decay=float(optimizer_config.weight_decay),
         eps=1e-8,
+        fused=fused,
+        capturable=bool(fused),
     )
 
     scheduler = get_scheduler(

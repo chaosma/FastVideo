@@ -11,6 +11,7 @@ import torch
 from tqdm.auto import tqdm
 
 from fastvideo.distributed import get_sp_group, get_world_group
+from fastvideo.memory_tracking import configure_from_env, mem_region
 from fastvideo.train.callbacks.callback import CallbackDict
 from fastvideo.train.methods.base import TrainingMethod
 from fastvideo.train.utils.tracking import build_tracker
@@ -97,6 +98,8 @@ class Trainer:
             int(tc.loop.gradient_accumulation_steps or 1),
         )
 
+        mem_recorder = configure_from_env(self.global_rank)
+
         method.set_tracker(self.tracker)
         method.on_train_start()
         self.callbacks.on_train_start(
@@ -132,6 +135,9 @@ class Trainer:
         )
         for step in progress:
             t0 = time.perf_counter()
+
+            if mem_recorder is not None:
+                mem_recorder.on_step_begin(step)
 
             # Accumulate on GPU during grad-accum; materialise
             # to CPU once per step right before logging.
@@ -171,8 +177,13 @@ class Trainer:
                 method,
                 iteration=step,
             )
-            method.optimizers_schedulers_step(step)
-            method.optimizers_zero_grad(step)
+            with mem_region("optimizer_step"):
+                method.optimizers_schedulers_step(step)
+            with mem_region("zero_grad"):
+                method.optimizers_zero_grad(step)
+
+            if mem_recorder is not None:
+                mem_recorder.on_step_end(step)
 
             # Single CPU sync point: materialise GPU tensors
             # to float right before logging.
@@ -210,6 +221,12 @@ class Trainer:
                 method,
                 iteration=step,
             )
+
+        # Warmup/continuous recording dumps at its last selected step; if
+        # training ended first (or used `all`), flush it here so the pickle is
+        # written and allocator history is turned off.
+        if mem_recorder is not None:
+            mem_recorder.finalize()
 
         self.callbacks.on_train_end(
             method,
