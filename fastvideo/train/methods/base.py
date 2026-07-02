@@ -183,6 +183,19 @@ class TrainingMethod(torch.nn.Module, ABC):
         the saved optimizer state is silently dropped.
         """
         for opt in self.get_optimizers(0):
+            # Optimizers that manage their own (pinned CPU) state allocate it on
+            # the first step, which happens AFTER dcp.load — so there are no
+            # entries for DCP to load into and the saved moments are dropped.
+            # Known limitation: optimizer-state resume is unsupported for these
+            # (model weights and LR schedule still resume normally).
+            if getattr(opt, "manages_own_state", False):
+                logger.warning(
+                    "%s manages its own optimizer state; saved Adam moments "
+                    "(exp_avg/exp_avg_sq/step) will NOT be restored on resume "
+                    "— training continues with fresh moments. Model weights "
+                    "and LR schedule resume normally. See "
+                    "StreamingCPUOffloadAdamW.", type(opt).__name__)
+                continue
             for group in opt.param_groups:
                 for p in group["params"]:
                     if not p.requires_grad:

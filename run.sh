@@ -56,4 +56,5 @@ FASTVIDEO_SAVE_ON_CPU="${SAVE_ON_CPU_ENABLE}" \
   --training.checkpoint.training_state_checkpointing_steps "${SAVE_CHECKPOINT_STEPS}" \
   --training.checkpoint.output_dir "outputs/wan_finetune_4k_${MODEL}_${TAG}" \
   --training.tracker.run_name "wan_4k_${MODEL}_${TAG}" \
+  "$@" \
   2>&1 | tee "${OUTER_LOG}"

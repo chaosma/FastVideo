@@ -315,6 +315,7 @@ def _build_training_config(
             sp_size=int(d.get("sp_size", num_gpus) or num_gpus),
             hsdp_replicate_dim=int(d.get("hsdp_replicate_dim", 1) or 1),
             hsdp_shard_dim=int(d.get("hsdp_shard_dim", num_gpus) or num_gpus),
+            fsdp_cpu_offload=bool(d.get("fsdp_cpu_offload", False)),
             pin_cpu_memory=bool(d.get("pin_cpu_memory", False)),
         ),
         data=DataConfig(
@@ -332,6 +333,9 @@ def _build_training_config(
             learning_rate=float(o.get("learning_rate", 0.0) or 0.0),
             betas=betas,
             weight_decay=float(o.get("weight_decay", 0.0) or 0.0),
+            step_in_backward=bool(o.get("step_in_backward", False)),
+            streamed_offload=bool(o.get("streamed_offload", True)),
+            pinned_state=bool(o.get("pinned_state", True)),
             lr_scheduler=str(o.get("lr_scheduler", "constant") or "constant"),
             lr_warmup_steps=int(o.get("lr_warmup_steps", 0) or 0),
             lr_num_cycles=int(o.get("lr_num_cycles", 0) or 0),

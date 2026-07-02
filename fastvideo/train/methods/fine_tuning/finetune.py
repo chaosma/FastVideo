@@ -184,4 +184,5 @@ class FineTuneMethod(TrainingMethod):
             learning_rate=student_lr,
             betas=student_betas,
             scheduler_name=student_sched,
+            cpu_offload=bool(tc.distributed.fsdp_cpu_offload),
         )

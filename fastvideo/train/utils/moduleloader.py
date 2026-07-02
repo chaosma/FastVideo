@@ -48,7 +48,7 @@ def _make_training_args(
         hsdp_replicate_dim=tc.distributed.hsdp_replicate_dim,
         hsdp_shard_dim=tc.distributed.hsdp_shard_dim,
         pin_cpu_memory=tc.distributed.pin_cpu_memory,
-        dit_cpu_offload=False,
+        dit_cpu_offload=tc.distributed.fsdp_cpu_offload,
         dit_layerwise_offload=False,
         vae_cpu_offload=False,
         text_encoder_cpu_offload=False,

@@ -37,6 +37,28 @@ class GradNormClipCallback(Callback):
         self._max_grad_norm = float(max_grad_norm)
         self._log_grad_norms = bool(log_grad_norms)
 
+    def _raise_if_step_in_backward(
+        self,
+        method: TrainingMethod,
+        iteration: int,
+    ) -> None:
+        if any(
+                getattr(opt, "consumes_grad_in_backward", False)
+                for opt in method.get_optimizers(iteration)):
+            raise RuntimeError("GradNormClipCallback is incompatible with "
+                               "training.optimizer.step_in_backward because "
+                               "grads are consumed during backward. Disable "
+                               "the grad_clip callback or set max_grad_norm "
+                               "<= 0.")
+
+    def on_train_start(
+        self,
+        method: TrainingMethod,
+        iteration: int = 0,
+    ) -> None:
+        if self._max_grad_norm > 0.0:
+            self._raise_if_step_in_backward(method, iteration)
+
     def on_before_optimizer_step(
         self,
         method: TrainingMethod,
@@ -45,6 +67,7 @@ class GradNormClipCallback(Callback):
         max_norm = self._max_grad_norm
         if max_norm <= 0.0:
             return
+        self._raise_if_step_in_backward(method, iteration)
 
         targets = method.get_grad_clip_targets(iteration)
         tracker = getattr(method, "tracker", None)

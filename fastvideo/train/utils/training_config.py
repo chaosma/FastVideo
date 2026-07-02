@@ -17,6 +17,7 @@ class DistributedConfig:
     sp_size: int = 1
     hsdp_replicate_dim: int = 1
     hsdp_shard_dim: int = -1
+    fsdp_cpu_offload: bool = False
     pin_cpu_memory: bool = False
 
 
@@ -38,6 +39,14 @@ class OptimizerConfig:
     learning_rate: float = 0.0
     betas: tuple[float, float] = (0.9, 0.999)
     weight_decay: float = 0.0
+    step_in_backward: bool = False
+    # When FSDP CPU offload is on, run the optimizer update on GPU via
+    # layer-by-layer CPU<->GPU streaming instead of PyTorch's CPU step.
+    # false -> PyTorch's CPU optimizer (the offload "baseline").
+    streamed_offload: bool = True
+    # Allocate optimizer moments in pinned host memory (needed for async
+    # overlap); set false on RAM-constrained hosts (slower, still correct).
+    pinned_state: bool = True
     lr_scheduler: str = "constant"
     lr_warmup_steps: int = 0
     lr_num_cycles: int = 0
