@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import os
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -11,7 +13,42 @@ import torch
 from tqdm.auto import tqdm
 
 from fastvideo.distributed import get_sp_group, get_world_group
+from fastvideo.logger import init_logger
 from fastvideo.memory_tracking import configure_from_env, mem_region
+
+logger = init_logger(__name__)
+
+
+def _maybe_torch_profiler():
+    """Gated torch.profiler around the training loop.
+
+    Enabled by ``FASTVIDEO_TRAIN_PROFILE=<dir>`` (writes a Chrome/Perfetto
+    trace via ``tensorboard_trace_handler``). No-op otherwise. The schedule
+    (``FASTVIDEO_TRAIN_PROFILE_WAIT/WARMUP/ACTIVE``) skips warmup steps then
+    records a few; only rank 0 records by default.
+    """
+    out = os.environ.get("FASTVIDEO_TRAIN_PROFILE")
+    if not out:
+        return contextlib.nullcontext(None)
+    os.makedirs(out, exist_ok=True)
+    wait = int(os.environ.get("FASTVIDEO_TRAIN_PROFILE_WAIT", "1"))
+    warmup = int(os.environ.get("FASTVIDEO_TRAIN_PROFILE_WARMUP", "1"))
+    active = int(os.environ.get("FASTVIDEO_TRAIN_PROFILE_ACTIVE", "2"))
+    acts = [torch.profiler.ProfilerActivity.CPU]
+    if torch.cuda.is_available():
+        acts.append(torch.profiler.ProfilerActivity.CUDA)
+    logger.info("TRAIN_PROFILE: torch profiler on, trace dir=%s "
+                "(wait=%d warmup=%d active=%d)", out, wait, warmup, active)
+    return torch.profiler.profile(
+        activities=acts,
+        schedule=torch.profiler.schedule(wait=wait, warmup=warmup,
+                                         active=active, repeat=1),
+        on_trace_ready=torch.profiler.tensorboard_trace_handler(
+            out, use_gzip=True),
+        record_shapes=True,
+        with_stack=True,
+        profile_memory=True,
+    )
 from fastvideo.train.callbacks.callback import CallbackDict
 from fastvideo.train.methods.base import TrainingMethod
 from fastvideo.train.utils.tracking import build_tracker
@@ -133,6 +170,9 @@ class Trainer:
             desc="Steps",
             disable=self.local_rank > 0,
         )
+        _prof_cm = (_maybe_torch_profiler() if self.global_rank == 0
+                    else contextlib.nullcontext(None))
+        _prof = _prof_cm.__enter__()
         for step in progress:
             t0 = time.perf_counter()
 
@@ -221,6 +261,11 @@ class Trainer:
                 method,
                 iteration=step,
             )
+
+            if _prof is not None:
+                _prof.step()
+
+        _prof_cm.__exit__(None, None, None)
 
         # Warmup/continuous recording dumps at its last selected step; if
         # training ended first (or used `all`), flush it here so the pickle is

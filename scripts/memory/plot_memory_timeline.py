@@ -187,8 +187,31 @@ def _phase_windows(snapshot, device, t0_us):
     return windows
 
 
+def _fsdp_block_starts(events, t0, gap_ms: float = 2.0):
+    """Times (ms since t0) of FSDP all-gather clusters = block-forward starts.
+
+    Each block's forward begins by all-gathering its params
+    (``_fsdp_param.py:alloc_storage`` under ``wait_for_unshard``/``pre_forward``);
+    consecutive such allocs within ``gap_ms`` are one cluster (one block).
+    """
+    starts, prev = [], None
+    for e in events:
+        if e.get("action") != "alloc":
+            continue
+        frs = e.get("frames") or []
+        if not any((f.get("filename", "").endswith("_fsdp_param.py")
+                    and f.get("name") == "alloc_storage") for f in frs):
+            continue
+        tms = (e["time_us"] - t0) / 1e3
+        if prev is None or tms - prev > gap_ms:
+            starts.append(tms)
+        prev = tms
+    return starts
+
+
 def build_figure(snapshot, min_marker_bytes: float, sidecar: dict | None = None,
-                 config_label: str = "baseline", is_oom: bool = False):
+                 config_label: str = "baseline", is_oom: bool = False,
+                 mark_blocks: bool = False):
     import plotly.graph_objects as go
 
     # H200 HBM3e capacity, for an at-a-glance "how close to OOM" reference line.
@@ -423,6 +446,18 @@ def build_figure(snapshot, min_marker_bytes: float, sidecar: dict | None = None,
     y_top = max(peak_res, peak_res_auth, _H200_CAPACITY_GIB) * 1.06
     fig.update_yaxes(rangemode="tozero", gridcolor="#e9ecef", range=[0, y_top])
     fig.update_xaxes(gridcolor="#f1f3f5")
+
+    if mark_blocks:
+        starts = _fsdp_block_starts(events, t0)
+        for i, x in enumerate(starts):
+            fig.add_vline(x=x, line_width=1, line_dash="dot",
+                          line_color="rgba(120,40,160,0.45)")
+        if starts:
+            fig.add_annotation(x=starts[0], yref="paper", y=1.0,
+                               text=f"↧ FSDP block-forward starts "
+                                    f"({len(starts)} blocks, dotted purple)",
+                               showarrow=False, xanchor="left",
+                               font=dict(color="rgb(120,40,160)", size=11))
     return fig
 
 
@@ -436,6 +471,9 @@ def main() -> None:
                     help="min block-alloc size to mark (cudaMallocs always marked)")
     ap.add_argument("--config-label", default="baseline",
                     help="experiment config description shown in the title")
+    ap.add_argument("--mark-fsdp-blocks", action="store_true",
+                    help="draw a dotted vertical line at each FSDP "
+                         "all-gather (transformer-block forward start)")
     args = ap.parse_args()
 
     with open(args.pickle, "rb") as fh:
@@ -455,7 +493,8 @@ def main() -> None:
               or "oom" in os.path.basename(args.pickle).lower())
 
     fig = build_figure(snapshot, args.min_marker_mib * 2**20, sidecar=sidecar,
-                       config_label=args.config_label, is_oom=is_oom)
+                       config_label=args.config_label, is_oom=is_oom,
+                       mark_blocks=args.mark_fsdp_blocks)
     out = args.output or (args.pickle.rsplit(".pickle", 1)[0] + ".timeline.html")
     fig.write_html(
         out, include_plotlyjs="inline", full_html=True,
