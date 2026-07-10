@@ -40,6 +40,7 @@ RUNGS = {
     3: dict(height=2160, width=3840, num_latent_t=1,  num_frames=1),
     4: dict(height=1440, width=2560, num_latent_t=1,  num_frames=1),
     5: dict(height=1080, width=1920, num_latent_t=1,  num_frames=1),
+    6: dict(height=2160, width=3840, num_latent_t=31, num_frames=121),
 }
 
 # Wan VAE config
