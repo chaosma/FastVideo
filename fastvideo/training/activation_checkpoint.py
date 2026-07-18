@@ -25,6 +25,10 @@ class CheckpointType(str, Enum):
     OPS = "ops"
     BLOCK_SKIP = "block_skip"
     SELF_ATTN = "self_attn"
+    # Same as SELF_ATTN, but the saved self-attn outputs are streamed to pinned
+    # CPU memory during forward and back to GPU during recompute, trading the
+    # GPU-resident SAC cache floor for PCIe traffic. See sac_cpu_offload.py.
+    SELF_ATTN_CPU = "self_attn_cpu"
 
 
 _SELECTIVE_ACTIVATION_CHECKPOINTING_OPS = {
@@ -74,6 +78,10 @@ def apply_activation_checkpointing(module: torch.nn.Module,
     elif base == CheckpointType.SELF_ATTN:
         _warn_if_attention_not_interceptable()
         module = _apply_self_attn_checkpointing(module, coverage)
+    elif base == CheckpointType.SELF_ATTN_CPU:
+        _warn_if_attention_not_interceptable()
+        module = _apply_self_attn_checkpointing(
+            module, coverage, context_fn=_self_attn_cpu_offload_context_fn)
     else:
         raise ValueError(
             f"Checkpointing type '{checkpointing_type}' not supported. "
@@ -247,6 +255,24 @@ def _self_attn_sac_context_fn():
     return create_selective_checkpoint_contexts(_policy)
 
 
+def _self_attn_cpu_offload_context_fn():
+    from torch.utils.checkpoint import CheckpointPolicy
+
+    from fastvideo.training.sac_cpu_offload import (
+        create_cpu_offload_selective_checkpoint_contexts)
+
+    def _policy(ctx, func, *args, **kwargs):
+        # Offload the self-attention output to pinned CPU (reloaded during
+        # recompute, skipping the flash forward); recompute everything else.
+        if func in _ATTENTION_OPS and _is_self_attention(args):
+            return CheckpointPolicy.MUST_CPU_OFFLOAD
+        if func in _FA3_ATTENTION_OPS and _is_self_attention_fa3(args):
+            return CheckpointPolicy.MUST_CPU_OFFLOAD
+        return CheckpointPolicy.PREFER_RECOMPUTE
+
+    return create_cpu_offload_selective_checkpoint_contexts(_policy)
+
+
 def _covered_indices(n_blocks: int, coverage: float) -> set[int]:
     """Pick round(coverage * n_blocks) block indices, spread over [0, n)."""
     m = max(0, min(n_blocks, round(coverage * n_blocks)))
@@ -259,7 +285,8 @@ def _covered_indices(n_blocks: int, coverage: float) -> set[int]:
 
 def _apply_self_attn_checkpointing(
         module: torch.nn.Module,
-        coverage: float = 1.0) -> torch.nn.Module:
+        coverage: float = 1.0,
+        context_fn=_self_attn_sac_context_fn) -> torch.nn.Module:
     applied = False
     for transformer_block_name in TRANSFORMER_BLOCK_NAMES:
         blocks: torch.nn.Module = getattr(module, transformer_block_name, None)
@@ -272,7 +299,7 @@ def _apply_self_attn_checkpointing(
                 # Save self-attn output, recompute the rest of the block.
                 block = checkpoint_wrapper(
                     block,
-                    context_fn=_self_attn_sac_context_fn,
+                    context_fn=context_fn,
                     preserve_rng_state=False)
             else:
                 # Uncovered blocks use plain activation checkpointing: only the
