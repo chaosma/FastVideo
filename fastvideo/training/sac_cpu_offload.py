@@ -23,6 +23,7 @@ memory/PCIe trade-off analysis.
 """
 from __future__ import annotations
 
+import inspect
 import itertools
 import os
 from collections import defaultdict
@@ -40,11 +41,35 @@ from torch.utils._python_dispatch import TorchDispatchMode
 # diverging from upstream behavior.
 from torch.utils.checkpoint import (  # type: ignore[attr-defined]
     SAC_IGNORED_OPS, CheckpointPolicy, SelectiveCheckpointContext,
-    _is_compiling, _maybe_detach, _policy_from_bool, _VersionWrapper)
+    _is_compiling, _policy_from_bool, _VersionWrapper)
+
+# torch 2.13 renamed the SAC detach helper ``_maybe_detach(x, alias_info)`` ->
+# ``_detach_helper(x)`` and dropped the ``any_ret_has_alias_info`` argument
+# (it now always detaches tensors, which is what upstream's own caching mode
+# does). Support both arities so the code is not pinned to one torch; fail
+# loudly if neither symbol exists, which would signal a deeper
+# checkpoint-internals change we must not silently diverge from.
+try:
+    from torch.utils.checkpoint import (  # type: ignore[attr-defined]
+        _maybe_detach as _torch_detach_helper)
+except ImportError:
+    from torch.utils.checkpoint import (  # type: ignore[attr-defined]
+        _detach_helper as _torch_detach_helper)
 
 from fastvideo.logger import init_logger
 
 logger = init_logger(__name__)
+
+# Defined after the imports (not between them) so the block stays E402-clean.
+_DETACH_HELPER_TAKES_ALIAS_INFO = len(
+    inspect.signature(_torch_detach_helper).parameters) >= 2
+
+
+def _maybe_detach(x: Any, alias_info: bool) -> Any:
+    """Call torch's SAC detach helper across the 2.13 signature change."""
+    if _DETACH_HELPER_TAKES_ALIAS_INFO:
+        return _torch_detach_helper(x, alias_info)
+    return _torch_detach_helper(x)
 
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 
@@ -122,6 +147,41 @@ def _warn_no_offload_once() -> None:
         "(TORCH_SDPA) and FlashAttention-3 are intercepted; FlashAttention-4 / "
         "cute and the standalone flash_attn (FA2) op are not. Pick an "
         "intercepted backend or extend the policy before relying on this.")
+
+
+_WARNED_STRICT_VERSION_SSD = False
+
+
+def _warn_strict_version_ssd_once() -> None:
+    # The SSD path returns before _pack_leaf's strict_ref/version capture, so the
+    # FASTVIDEO_SAC_OFFLOAD_STRICT_VERSION mutation check does not run for
+    # SSD-spilled tensors. Warn rather than let a debug flag silently no-op.
+    global _WARNED_STRICT_VERSION_SSD
+    if _WARNED_STRICT_VERSION_SSD:
+        return
+    _WARNED_STRICT_VERSION_SSD = True
+    logger.warning(
+        "SAC CPU offload: FASTVIDEO_SAC_OFFLOAD_STRICT_VERSION is set but the "
+        "SSD spill path does not run the mutation check (the tensor is spilled "
+        "to disk, not kept GPU-resident). Strict-version validation is a no-op "
+        "for SSD-spilled tensors; disable FASTVIDEO_SSD_SPILL to exercise it.")
+
+
+_WARNED_SSD_BUDGET_EXHAUSTED = False
+
+
+def _warn_ssd_budget_exhausted_once(detail: str) -> None:
+    # SSD budget could not fit a selected tensor. Degrade to the pinned/GPU path
+    # rather than crash; warn once so the config problem is visible.
+    global _WARNED_SSD_BUDGET_EXHAUSTED
+    if _WARNED_SSD_BUDGET_EXHAUSTED:
+        return
+    _WARNED_SSD_BUDGET_EXHAUSTED = True
+    logger.warning(
+        "SAC CPU offload: SSD spill budget exhausted (%s); falling back to the "
+        "pinned/GPU-resident path for this and further oversized tensors. Raise "
+        "FASTVIDEO_HOST_RAM_BUDGET_GB or lower coverage to actually spill them.",
+        detail)
 
 
 # ---------------------------------------------------------------------------
@@ -250,9 +310,16 @@ _STATS = _OffloadStats()
 
 @dataclass(slots=True)
 class OffloadedTensor:
-    """Handle to a self-attn output snapshotted into pinned host memory."""
+    """Handle to a self-attn output snapshotted into pinned host memory.
+
+    Two modes. Default: ``host`` holds a pinned buffer from ``pool`` (GPU stays
+    off the SAC floor, tensor rides in RAM). SSD mode (``manager`` set): the
+    bytes may be spilled to disk; ``handle`` is the manager's ``SpillHandle``
+    and ``reload`` asks the manager to make it resident (from SSD if needed)
+    before the H2D.
+    """
     host: torch.Tensor | None
-    pool: _PinnedPool
+    pool: _PinnedPool | None
     device: torch.device
     shape: torch.Size
     stride: tuple[int, ...]
@@ -261,8 +328,38 @@ class OffloadedTensor:
     # mutation check; keeps a GPU reference alive, so it is not for long runs.
     strict_ref: torch.Tensor | None = None
     version: int | None = None
+    # SSD-spill mode: the per-device manager and this tensor's spill handle.
+    manager: Any = None
+    handle: Any = None
+
+    def _reload_from_ssd(self) -> torch.Tensor:
+        host_tensor = self.manager.ensure_resident(self.handle)
+        stream = _copy_stream(self.device)
+        with torch.cuda.stream(stream):
+            # Preserve the original stride (SSD accepts non-contiguous leaves),
+            # matching the non-SSD pinned reload path. The staging bytes are
+            # contiguous; copy_ fills the strided tensor by logical index, so
+            # values and stride both match the saved output.
+            device_tensor = torch.empty_strided(self.shape,
+                                                 self.stride,
+                                                 dtype=self.dtype,
+                                                 device=self.device)
+            device_tensor.copy_(host_tensor, non_blocking=True)
+        current = torch.cuda.current_stream(self.device)
+        current.wait_stream(stream)
+        device_tensor.record_stream(current)
+        # Conservative v1: synchronize the copy stream so the manager cannot
+        # recycle the pooled staging buffer (via a prefetch read on an I/O
+        # thread) while this H2D is still reading it. Overlapping the H2D via a
+        # deferred, event-gated free is a later refinement.
+        stream.synchronize()
+        self.manager.release(self.handle)
+        self.manager = self.handle = None
+        return device_tensor
 
     def reload(self) -> torch.Tensor:
+        if self.manager is not None:
+            return self._reload_from_ssd()
         assert self.host is not None, "OffloadedTensor already reloaded"
         if (self.strict_ref is not None and self.version is not None
                 and self.strict_ref._version != self.version):
@@ -299,10 +396,17 @@ class _OffloadCache:
     """
     __slots__ = ("entries", "n_offload_ops", "n_reloaded_ops",
                  "n_offloaded_leaves", "n_reloaded_leaves", "offloaded_bytes",
-                 "fallback_leaves", "fallback_bytes", "op_names")
+                 "fallback_leaves", "fallback_bytes", "op_names",
+                 "block_index", "manager")
 
-    def __init__(self) -> None:
+    def __init__(self, block_index: int | None = None) -> None:
         self.entries: dict[Any, list] = defaultdict(list)
+        # Global forward order of this block; used by the SSD manager to
+        # schedule spill/prefetch. None when SSD spill is not in play.
+        self.block_index = block_index
+        # Set to the per-device SSD manager on the first SSD-spilled leaf so the
+        # replay mode can drive prefetch. None => no SSD spill this block.
+        self.manager: Any = None
         self.n_offload_ops = 0  # ops stored under an offload policy (forward)
         self.n_reloaded_ops = 0  # ops replayed under an offload policy (bwd)
         self.n_offloaded_leaves = 0  # tensor leaves physically moved to host
@@ -314,6 +418,74 @@ class _OffloadCache:
         self.fallback_leaves = 0
         self.fallback_bytes = 0
         self.op_names: set[str] = set()
+
+
+def _ssd_pack_leaf(x: torch.Tensor, *, nbytes: int,
+                   cache: _OffloadCache) -> OffloadedTensor | None:
+    """SSD-spill path for one leaf, or None to fall back to pinned offload.
+
+    Returns None (pinned fallback) only when the SSD gate is not active for
+    ``x``'s device or this block has no ``block_index``. There is no contiguity
+    fallback: the host staging buffer is always contiguous/aligned and
+    ``dst.copy_(x)`` gathers a strided source into it, so any layout is spilled
+    (reload rebuilds the original stride via ``empty_strided``).
+    """
+    if not x.is_cuda or cache.block_index is None:
+        return None
+    from fastvideo.training import ssd_config
+    mgr = ssd_config.ssd_manager(x.device)
+    if mgr is None:
+        return None
+    if _strict_version():
+        _warn_strict_version_ssd_once()
+    # No contiguity fallback: the host staging buffer is always contiguous and
+    # aligned, and ``dst.copy_(x)`` gathers a strided source into it. Routing
+    # every selected leaf through the manager keeps host RAM bounded by the SSD
+    # budget -- falling back to the separate (uncapped) pinned pool would not.
+    device = x.device
+    try:
+        staging = mgr.acquire_staging(nbytes)  # aligned, padded, pinned
+    except RuntimeError as e:
+        # Budget exhausted with nothing to spill/drop. Degrade like the non-SSD
+        # pinned path (return None -> caller keeps the tensor pinned/GPU-resident)
+        # instead of crashing the run mid-forward.
+        _warn_ssd_budget_exhausted_once(str(e))
+        return None
+    stream = _copy_stream(device)
+    try:
+        dst = staging[:nbytes].view(x.dtype).view(x.shape)
+        stream.wait_stream(torch.cuda.current_stream(device))
+        with torch.cuda.stream(stream):
+            dst.copy_(x, non_blocking=True)
+        x.record_stream(stream)
+        event = torch.cuda.Event()
+        event.record(stream)  # signals the D2H fill; manager waits before pwrite
+        handle = mgr.admit(staging,
+                           block_index=cache.block_index,
+                           shape=tuple(x.shape),
+                           dtype=x.dtype,
+                           nbytes=nbytes,
+                           d2h_event=event)
+    except Exception:
+        # Return the unadmitted buffer so a fault does not leak budget bytes.
+        try:
+            stream.synchronize()
+        except Exception:
+            pass
+        mgr.discard_staging(staging)
+        raise
+    cache.manager = mgr
+    cache.n_offloaded_leaves += 1
+    cache.offloaded_bytes += nbytes
+    _STATS.record_offload(x, device)
+    return OffloadedTensor(host=None,
+                           pool=None,
+                           device=device,
+                           shape=x.shape,
+                           stride=x.stride(),
+                           dtype=x.dtype,
+                           manager=mgr,
+                           handle=handle)
 
 
 def _pack_leaf(x: Any, *, offload: bool, alias_info: bool,
@@ -334,6 +506,9 @@ def _pack_leaf(x: Any, *, offload: bool, alias_info: bool,
     if nbytes < _min_offload_bytes():
         return _VersionWrapper(detached)
     device = x.device
+    ssd = _ssd_pack_leaf(x, nbytes=nbytes, cache=cache)
+    if ssd is not None:
+        return ssd
     host = _pinned_pool(device).acquire(x)
     if host is None:
         _STATS.record_fallback(x, "pinned pool cap or unpinnable layout")
@@ -465,6 +640,16 @@ class _CpuOffloadReplayMode(TorchDispatchMode):
         self.cache = cache
         self.allow_cache_entry_mutation = allow_cache_entry_mutation
 
+    def __enter__(self):
+        result = super().__enter__()
+        # Backward is entering this block's recompute: kick off SSD reads for
+        # the spilled blocks just below it so they are resident by the time the
+        # reverse walk reaches them.
+        if (self.cache.manager is not None
+                and self.cache.block_index is not None):
+            self.cache.manager.on_block_recompute_enter(self.cache.block_index)
+        return result
+
     def __torch_dispatch__(self, func, types, args=(), kwargs=None):
         if func in SAC_IGNORED_OPS:
             return func(*args, **kwargs)
@@ -520,7 +705,9 @@ class _CpuOffloadReplayMode(TorchDispatchMode):
 
 
 def create_cpu_offload_selective_checkpoint_contexts(
-        policy_fn, allow_cache_entry_mutation: bool = False):
+        policy_fn,
+        allow_cache_entry_mutation: bool = False,
+        block_index: int | None = None):
     """CPU-offload analogue of ``create_selective_checkpoint_contexts``.
 
     ``policy_fn`` returns a ``CheckpointPolicy`` per op. Return
@@ -529,7 +716,7 @@ def create_cpu_offload_selective_checkpoint_contexts(
     ``MUST_SAVE`` / ``PREFER_SAVE`` keep the output GPU-resident;
     ``PREFER_RECOMPUTE`` recomputes as usual.
     """
-    cache = _OffloadCache()
+    cache = _OffloadCache(block_index=block_index)
     return (
         _CpuOffloadCachingMode(policy_fn, cache),
         _CpuOffloadReplayMode(policy_fn, cache, allow_cache_entry_mutation),

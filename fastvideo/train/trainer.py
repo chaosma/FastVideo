@@ -196,6 +196,12 @@ class Trainer:
                     grad_accum_rounds=grad_accum,
                 )
 
+                # Reclaim any SSD-spill handles whose backward node never ran
+                # this micro-batch, so orphans do not accumulate across steps
+                # (no-op when SSD spill is off).
+                from fastvideo.training.ssd_config import reset_step_all
+                reset_step_all()
+
                 for k, v in loss_map.items():
                     if isinstance(v, torch.Tensor):
                         prev = loss_sums.get(k, 0.0)
@@ -272,6 +278,15 @@ class Trainer:
         # written and allocator history is turned off.
         if mem_recorder is not None:
             mem_recorder.finalize()
+
+        # Observability only: dump SSD-spill residency counters (n_spilled /
+        # prefetch_underruns etc.) while logging is still alive. No-op when SSD
+        # spill is disabled.
+        try:
+            from fastvideo.training.ssd_config import log_all_manager_stats
+            log_all_manager_stats()
+        except Exception:
+            pass
 
         self.callbacks.on_train_end(
             method,

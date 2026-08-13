@@ -1,4 +1,5 @@
 import collections
+import functools
 from enum import Enum
 
 import torch
@@ -6,6 +7,7 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper)
 
 from fastvideo.logger import init_logger
+from fastvideo.training.block_context import wrap_forward_with_block_context
 
 logger = init_logger(__name__)
 
@@ -62,6 +64,18 @@ except Exception:
         "cannot intercept FA3 attention ops (_FA3_ATTENTION_OPS is empty).")
 
 
+def _block_context_needed() -> bool:
+    """Whether blocks must carry the block-index context.
+
+    Only the generic saved-tensor SSD adapter reads it; when that gate is off,
+    skipping the wrap keeps non-SSD runs byte-identical (no per-block contextvar,
+    no forward closure that breaks deepcopy/pickle). Lazy import avoids a hard
+    ssd_config dependency at module load.
+    """
+    from fastvideo.training.ssd_config import saved_tensors_ssd_enabled
+    return saved_tensors_ssd_enabled()
+
+
 def apply_activation_checkpointing(module: torch.nn.Module,
                                    checkpointing_type:
                                    str = CheckpointType.FULL,
@@ -81,7 +95,10 @@ def apply_activation_checkpointing(module: torch.nn.Module,
     elif base == CheckpointType.SELF_ATTN_CPU:
         _warn_if_attention_not_interceptable()
         module = _apply_self_attn_checkpointing(
-            module, coverage, context_fn=_self_attn_cpu_offload_context_fn)
+            module,
+            coverage,
+            make_context_fn=lambda idx: functools.partial(
+                _self_attn_cpu_offload_context_fn, idx))
     else:
         raise ValueError(
             f"Checkpointing type '{checkpointing_type}' not supported. "
@@ -109,14 +126,25 @@ def _apply_activation_checkpointing_blocks(
         module: torch.nn.Module,
         n_layer: int | None = None) -> torch.nn.Module:
     applied = False
+    base_index = 0
     for transformer_block_name in TRANSFORMER_BLOCK_NAMES:
         blocks: torch.nn.Module = getattr(module, transformer_block_name, None)
         if blocks is None:
             continue
-        for index, (layer_id, block) in enumerate(blocks.named_children()):
+        children = list(blocks.named_children())
+        for index, (layer_id, block) in enumerate(children):
             if n_layer is None or index % n_layer == 0:
                 block = checkpoint_wrapper(block, preserve_rng_state=False)
-                blocks.register_module(layer_id, block)
+            # The block-index context is only consumed by the generic
+            # saved-tensor SSD adapter, so only wrap when it is active. This
+            # keeps the default (full / block_skip, no SSD) path byte-identical
+            # -- no per-block contextvar set/reset, no forward closure that would
+            # defeat deepcopy/pickle of the module.
+            if _block_context_needed():
+                block = wrap_forward_with_block_context(block,
+                                                        base_index + index)
+            blocks.register_module(layer_id, block)
+        base_index += len(children)
         applied = True
     if not applied:
         raise ValueError("Activation checkpointing is not applied successfully")
@@ -255,7 +283,7 @@ def _self_attn_sac_context_fn():
     return create_selective_checkpoint_contexts(_policy)
 
 
-def _self_attn_cpu_offload_context_fn():
+def _self_attn_cpu_offload_context_fn(block_index: int | None = None):
     from torch.utils.checkpoint import CheckpointPolicy
 
     from fastvideo.training.sac_cpu_offload import (
@@ -270,7 +298,8 @@ def _self_attn_cpu_offload_context_fn():
             return CheckpointPolicy.MUST_CPU_OFFLOAD
         return CheckpointPolicy.PREFER_RECOMPUTE
 
-    return create_cpu_offload_selective_checkpoint_contexts(_policy)
+    return create_cpu_offload_selective_checkpoint_contexts(
+        _policy, block_index=block_index)
 
 
 def _covered_indices(n_blocks: int, coverage: float) -> set[int]:
@@ -286,8 +315,14 @@ def _covered_indices(n_blocks: int, coverage: float) -> set[int]:
 def _apply_self_attn_checkpointing(
         module: torch.nn.Module,
         coverage: float = 1.0,
-        context_fn=_self_attn_sac_context_fn) -> torch.nn.Module:
+        make_context_fn=None) -> torch.nn.Module:
+    # ``make_context_fn(global_block_index)`` returns the per-block context_fn.
+    # The default (plain GPU-resident SAC) ignores the index; the CPU-offload
+    # variant binds it so the SSD manager can schedule spill/prefetch by block.
+    if make_context_fn is None:
+        make_context_fn = lambda _idx: _self_attn_sac_context_fn
     applied = False
+    base_index = 0  # global forward order across block groups
     for transformer_block_name in TRANSFORMER_BLOCK_NAMES:
         blocks: torch.nn.Module = getattr(module, transformer_block_name, None)
         if blocks is None:
@@ -299,7 +334,7 @@ def _apply_self_attn_checkpointing(
                 # Save self-attn output, recompute the rest of the block.
                 block = checkpoint_wrapper(
                     block,
-                    context_fn=context_fn,
+                    context_fn=make_context_fn(base_index + index),
                     preserve_rng_state=False)
             else:
                 # Uncovered blocks use plain activation checkpointing: only the
@@ -308,7 +343,14 @@ def _apply_self_attn_checkpointing(
                 # additionally keep the self-attn output so its expensive flash
                 # forward is not recomputed.
                 block = checkpoint_wrapper(block, preserve_rng_state=False)
+            # Only wrap when the generic saved-tensor SSD adapter (the sole
+            # consumer of the block-index context) is active; SAC threads its
+            # block index through the context_fn, not this contextvar.
+            if _block_context_needed():
+                block = wrap_forward_with_block_context(block,
+                                                        base_index + index)
             blocks.register_module(layer_id, block)
+        base_index += len(children)
         applied = True
     if not applied:
         raise ValueError("Activation checkpointing is not applied successfully")

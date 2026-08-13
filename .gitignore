@@ -94,3 +94,4 @@ openspec/
 fastvideo/tests/ssim/reference_videos/**
 
 reports/
+wan14b-memory-report/

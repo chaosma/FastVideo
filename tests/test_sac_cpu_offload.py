@@ -15,8 +15,33 @@ import torch
 from torch.utils.checkpoint import (CheckpointPolicy,
                                      create_selective_checkpoint_contexts)
 
+from fastvideo.training import sac_cpu_offload
 from fastvideo.training.sac_cpu_offload import (
-    _PinnedPool, create_cpu_offload_selective_checkpoint_contexts)
+    _PinnedPool, _maybe_detach,
+    create_cpu_offload_selective_checkpoint_contexts)
+
+
+def test_maybe_detach_returns_detached_on_installed_torch() -> None:
+    x = (torch.ones(1, requires_grad=True) * 2)
+    out = _maybe_detach(x, False)
+    assert not out.requires_grad
+    assert torch.equal(out.detach(), x.detach())
+
+
+def test_maybe_detach_one_arg_fallback(monkeypatch) -> None:
+    # Exercise the torch>=2.13 one-arg ``_detach_helper(x)`` branch regardless of
+    # the installed torch version.
+    calls = []
+
+    def _one_arg(x):
+        calls.append(x)
+        return x.detach()
+
+    monkeypatch.setattr(sac_cpu_offload, "_torch_detach_helper", _one_arg)
+    monkeypatch.setattr(sac_cpu_offload, "_DETACH_HELPER_TAKES_ALIAS_INFO",
+                        False)
+    out = _maybe_detach(torch.ones(1), False)
+    assert len(calls) == 1 and not out.requires_grad
 
 CUDA = pytest.mark.skipif(not torch.cuda.is_available(),
                           reason="requires CUDA for pinned-host transport")
@@ -353,3 +378,67 @@ def test_offload_survives_stream_and_allocator_churn_cuda():
     torch.cuda.synchronize()
     torch.testing.assert_close(loss.detach(), loss_save)
     torch.testing.assert_close(x.grad.detach(), grad_save)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_sac_ssd_roundtrip_grad_parity_cuda(tmp_path, monkeypatch) -> None:
+    # End-to-end SAC SSD path (_ssd_pack_leaf / _reload_from_ssd, incl. the
+    # stride-preserving empty_strided reload) exercised by
+    # FASTVIDEO_SSD_SPILL=1 + self_attn_cpu. Force real spills with a tiny
+    # budget and confirm gradients match a no-checkpointing baseline.
+    import torch.nn.functional as F
+
+    from fastvideo.training import ssd_config
+    from fastvideo.training.activation_checkpoint import (
+        apply_activation_checkpointing)
+
+    class _Block(torch.nn.Module):
+
+        def __init__(self, dim: int) -> None:
+            super().__init__()
+            self.w = torch.nn.Linear(dim, dim, bias=False)
+
+        def forward(self, x):  # x: [B, heads, S, dim] -> self-attention
+            o = F.scaled_dot_product_attention(x, x, x)
+            return x + self.w(o)
+
+    class _Model(torch.nn.Module):
+
+        def __init__(self, n: int, dim: int) -> None:
+            super().__init__()
+            self.blocks = torch.nn.ModuleList([_Block(dim) for _ in range(n)])
+
+        def forward(self, x):
+            for b in self.blocks:
+                x = b(x)
+            return x
+
+    def _run(use_ac: bool):
+        torch.manual_seed(0)
+        model = _Model(4, 64).cuda()
+        torch.manual_seed(1)
+        x = torch.randn(1, 8, 8192, 64, device="cuda", requires_grad=True)
+        if use_ac:
+            apply_activation_checkpointing(model, "self_attn_cpu")
+        model(x).pow(2).sum().backward()
+        return ([x.grad.detach().clone()] +
+                [p.grad.detach().clone() for p in model.parameters()])
+
+    for k in ("FASTVIDEO_SSD_SPILL", "FASTVIDEO_SAVED_TENSORS_SSD_SPILL"):
+        monkeypatch.delenv(k, raising=False)
+    ssd_config.reset_managers()
+    base = _run(use_ac=False)
+
+    monkeypatch.setenv("FASTVIDEO_SSD_SPILL", "1")
+    monkeypatch.setenv("FASTVIDEO_SSD_DIR", str(tmp_path))
+    monkeypatch.setenv("FASTVIDEO_HOST_RAM_BUDGET_GB", "0.05")
+    ssd_config.reset_managers()
+    try:
+        got = _run(use_ac=True)
+        mgr = ssd_config.ssd_manager(torch.device("cuda:0"))
+        assert mgr is not None
+        assert mgr.n_spilled_by_category.get("sac", 0) >= 1
+        for g, b in zip(got, base):
+            torch.testing.assert_close(g, b, rtol=2e-3, atol=2e-3)
+    finally:
+        ssd_config.reset_managers()
